@@ -239,7 +239,7 @@ const generateReceiptHTML = (bill, payments) => {
             </div>
             <div class="info-row">
               <span class="info-label">Payment Date:</span>
-              <span class="info-value">${formatDate(payments[payments.length - 1].payment_date)}</span>
+              <span class="info-value">${formatDate(payments[payments.length - 1].actual_payment_date || payments[payments.length - 1].payment_date)}</span>
             </div>
             <div class="info-row">
               <span class="info-label">Status:</span>
@@ -303,7 +303,7 @@ const generateReceiptHTML = (bill, payments) => {
             <tbody>
               ${payments.map(payment => `
                 <tr>
-                  <td>${formatDate(payment.payment_date)}</td>
+                  <td>${formatDate(payment.actual_payment_date || payment.payment_date)}</td>
                   <td>${payment.payment_method.toUpperCase()}</td>
                   <td>${payment.notes || '-'}</td>
                   <td class="amount">${formatCurrency(payment.amount)}</td>

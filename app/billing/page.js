@@ -48,40 +48,76 @@ export default function BillingPage() {
     payment_amount: '',
     payment_method: 'regular',
     payment_type: 'cash',
+    actual_payment_date: new Date().toISOString().split('T')[0], // Default to today
     notes: ''
   })
+  const [currentElectricRate, setCurrentElectricRate] = useState(12.00) // Will be fetched from settings
 
   useEffect(() => {
     fetchData()
   }, [])
 
   const fetchData = async () => {
+    setLoading(true)
     try {
-      const { api } = await import('../../lib/api')
-      const [billsData, tenantsData, roomsData, branchesData] = await Promise.all([
-        api.getBills(),
-        api.getTenants(),
-        fetch('/api/bills/pending-rooms', {
-          headers: {
-            'Authorization': `Bearer ${localStorage.getItem('token')}`,
-            'Content-Type': 'application/json'
-          }
-        }).then(res => res.json()),
-        api.getBranches()
-      ])
+      // Fetch billing rates first
+      const ratesResponse = await fetch('/api/settings/billing-rates', {
+        headers: {
+          'Authorization': `Bearer ${localStorage.getItem('token')}`
+        }
+      })
       
-      setBills(billsData.bills || [])
-      setTenants(tenantsData.tenants?.filter(t => t.contract_status === 'active') || [])
-      setRooms(roomsData.rooms || [])
-      setBranches(branchesData.branches || [])
+      if (ratesResponse.ok) {
+        const ratesData = await ratesResponse.json()
+        if (ratesData.success) {
+          setCurrentElectricRate(ratesData.rates.electric_rate_per_kwh)
+          console.log('Current electric rate loaded:', ratesData.rates.electric_rate_per_kwh)
+        }
+      }
+
+      // Fetch branches data
+      const branchesResponse = await fetch('/api/branches', {
+        headers: {
+          'Authorization': `Bearer ${localStorage.getItem('token')}`
+        }
+      })
       
-      // Debug logging
-      console.log('Rooms data:', roomsData.rooms?.slice(0, 2)) // Show first 2 rooms
-      console.log('Branches data:', branchesData.branches)
-      console.log('Bills data sample:', billsData.bills?.slice(0, 2)) // Show first 2 bills
+      if (branchesResponse.ok) {
+        const branchesData = await branchesResponse.json()
+        if (branchesData.success) {
+          setBranches(branchesData.branches || [])
+          console.log('Branches loaded:', branchesData.branches.length)
+        }
+      } else {
+        console.error('Failed to fetch branches:', branchesResponse.status)
+      }
+
+      // Fetch rooms data
+      const roomsResponse = await fetch('/api/bills/pending-rooms', {
+        headers: {
+          'Authorization': `Bearer ${localStorage.getItem('token')}`
+        }
+      })
+      
+      if (roomsResponse.ok) {
+        const roomsData = await roomsResponse.json()
+        setRooms(roomsData.rooms || [])
+      }
+
+      // Fetch bills data
+      const billsResponse = await fetch('/api/bills', {
+        headers: {
+          'Authorization': `Bearer ${localStorage.getItem('token')}`
+        }
+      })
+      
+      if (billsResponse.ok) {
+        const billsData = await billsResponse.json()
+        setBills(billsData.bills || [])
+      }
     } catch (error) {
       console.error('Error fetching data:', error)
-      toast.error('Failed to load data')
+      toast.error('Failed to load billing data')
     } finally {
       setLoading(false)
     }
@@ -114,7 +150,7 @@ export default function BillingPage() {
     
     console.log('Room data received:', room)
     
-    // Ensure we have proper dates - if not, calculate them
+    // Use the calculated dates from the API (which follow tenant's billing cycle)
     let rentFrom = room.next_period_start
     let rentTo = room.next_period_end
     
@@ -126,19 +162,48 @@ export default function BillingPage() {
       rentTo = new Date(rentTo).toISOString().split('T')[0]
     }
     
-    console.log('Processed dates - From:', rentFrom, 'To:', rentTo)
+    console.log('Processed dates from API - From:', rentFrom, 'To:', rentTo)
     
-    // If dates are still missing, calculate current billing period
+    // Only use fallback if API data is completely missing or invalid
     if (!rentFrom || !rentTo || rentFrom === 'Invalid Date' || rentTo === 'Invalid Date') {
-      const now = new Date()
-      const currentMonth = now.getMonth()
-      const currentYear = now.getFullYear()
+      console.warn('API billing period data missing or invalid, using fallback calculation')
       
-      // Default to current month billing period
-      rentFrom = new Date(currentYear, currentMonth, 1).toISOString().split('T')[0]
-      rentTo = new Date(currentYear, currentMonth + 1, 0).toISOString().split('T')[0]
-      
-      console.log('Generated fallback dates - From:', rentFrom, 'To:', rentTo)
+      // Fallback: Try to calculate based on tenant's rent_start if available
+      if (room.rent_start) {
+        const rentStartDate = new Date(room.rent_start)
+        const rentStartDay = rentStartDate.getDate()
+        
+        // Calculate current billing period based on tenant's rent start day
+        const now = new Date()
+        const currentYear = now.getFullYear()
+        const currentMonth = now.getMonth()
+        
+        // Start from the tenant's billing day in current month
+        let periodStart = new Date(currentYear, currentMonth, rentStartDay)
+        
+        // If we're past the billing day, move to next month
+        if (now.getDate() > rentStartDay) {
+          periodStart = new Date(currentYear, currentMonth + 1, rentStartDay)
+        }
+        
+        // End date is one day before next month's billing day
+        const periodEnd = new Date(periodStart.getFullYear(), periodStart.getMonth() + 1, rentStartDay - 1)
+        
+        rentFrom = periodStart.toISOString().split('T')[0]
+        rentTo = periodEnd.toISOString().split('T')[0]
+        
+        console.log('Calculated fallback dates based on rent_start - From:', rentFrom, 'To:', rentTo)
+      } else {
+        // Last resort: use current month (1st to last day)
+        const now = new Date()
+        const currentMonth = now.getMonth()
+        const currentYear = now.getFullYear()
+        
+        rentFrom = new Date(currentYear, currentMonth, 1).toISOString().split('T')[0]
+        rentTo = new Date(currentYear, currentMonth + 1, 0).toISOString().split('T')[0]
+        
+        console.warn('Using last resort fallback dates (current month) - From:', rentFrom, 'To:', rentTo)
+      }
     }
     
     const formData = {
@@ -168,7 +233,7 @@ export default function BillingPage() {
     const present = parseFloat(presentReading) || 0
     const previous = parseFloat(billFormData.electric_previous_reading) || 0
     const consumption = Math.max(0, present - previous)
-    const rate = 12.00 // Default rate per kWh
+    const rate = currentElectricRate
     const amount = consumption * rate
     
     setBillFormData(prev => ({
@@ -229,10 +294,28 @@ export default function BillingPage() {
       payment_amount: bill.status === 'partial' ? bill.remaining_balance : bill.total_amount,
       payment_method: 'regular',
       payment_type: 'cash',
+      actual_payment_date: new Date().toISOString().split('T')[0], // Default to today
       notes: ''
     })
     setShowPaymentModal(true)
   }
+
+  // Auto-update payment amount when penalty fee is calculated
+  useEffect(() => {
+    if (selectedBill && paymentFormData.actual_payment_date) {
+      const penaltyFee = calculatePenaltyFee(selectedBill, paymentFormData.actual_payment_date)
+      const originalAmount = selectedBill.status === 'partial' ? selectedBill.remaining_balance : selectedBill.total_amount
+      const newAmount = parseFloat(originalAmount) + penaltyFee
+      
+      // Only update if the calculated amount is different from current amount
+      if (Math.abs(parseFloat(paymentFormData.payment_amount) - newAmount) > 0.01) {
+        setPaymentFormData(prev => ({
+          ...prev,
+          payment_amount: newAmount.toFixed(2)
+        }))
+      }
+    }
+  }, [selectedBill, paymentFormData.actual_payment_date])
 
   // Filter active bills (unpaid and partial) bills
   const activeBills = bills.filter(bill => bill.status !== 'paid')
@@ -283,6 +366,7 @@ export default function BillingPage() {
           payment_amount: parseFloat(paymentFormData.payment_amount),
           payment_method: paymentFormData.payment_method,
           payment_type: paymentFormData.payment_type,
+          actual_payment_date: paymentFormData.actual_payment_date,
           notes: paymentFormData.notes
         })
       })
@@ -308,6 +392,7 @@ export default function BillingPage() {
           payment_amount: '',
           payment_method: 'regular',
           payment_type: 'cash',
+          actual_payment_date: new Date().toISOString().split('T')[0],
           notes: ''
         })
         fetchData() // Refresh data
@@ -350,14 +435,35 @@ export default function BillingPage() {
   }
 
   const formatCurrency = (amount) => {
-    return new Intl.NumberFormat('en-PH', {
-      style: 'currency',
-      currency: 'PHP'
-    }).format(amount)
+    return `₱${parseFloat(amount || 0).toLocaleString('en-PH', { 
+      minimumFractionDigits: 2, 
+      maximumFractionDigits: 2 
+    })}`
   }
 
   const formatDate = (date) => {
     return new Date(date).toLocaleDateString('en-PH')
+  }
+
+  // Calculate penalty fee for late payments
+  const calculatePenaltyFee = (bill, actualPaymentDate) => {
+    if (!actualPaymentDate || bill.penalty_applied) return 0
+    
+    // Normalize dates to midnight for proper comparison
+    const paymentDate = new Date(actualPaymentDate)
+    paymentDate.setHours(0, 0, 0, 0)
+    
+    const billDate = new Date(bill.bill_date)
+    billDate.setHours(0, 0, 0, 0)
+    
+    const dueDate = new Date(bill.due_date || billDate.getTime() + (10 * 24 * 60 * 60 * 1000))
+    dueDate.setHours(0, 0, 0, 0)
+    
+    if (paymentDate > dueDate) {
+      return parseFloat(bill.total_amount) * 0.01 // 1% penalty
+    }
+    
+    return 0
   }
 
   const getBillingStatusBadge = (status, daysUntilDue) => {
@@ -776,7 +882,10 @@ export default function BillingPage() {
                         readOnly
                         className="mt-1 block w-full border border-gray-300 rounded-md px-3 py-2 bg-gray-50"
                       />
-                      <p className="text-xs text-gray-500 mt-1">₱12.00 per kWh</p>
+                      <p className="text-xs text-gray-500 mt-1">₱{currentElectricRate.toLocaleString('en-PH', { 
+                        minimumFractionDigits: 2, 
+                        maximumFractionDigits: 2 
+                      })} per kWh</p>
                     </div>
                   </div>
                 </div>
@@ -908,15 +1017,27 @@ export default function BillingPage() {
                     </>
                   )}
                   <div>
+                    <span className="text-gray-500">Due Date:</span>
+                    <span className="ml-2">{selectedBill.due_date ? formatDate(selectedBill.due_date) : 'Not set'}</span>
+                  </div>
+                  <div>
                     <span className="text-gray-500">Status:</span>
                     <span className={`ml-2 px-2 py-1 rounded text-xs ${
                       selectedBill.status === 'paid' ? 'bg-green-100 text-green-800' :
                       selectedBill.status === 'partial' ? 'bg-yellow-100 text-yellow-800' :
-                      'bg-red-100 text-red-800'
+                      selectedBill.is_overdue ? 'bg-red-100 text-red-800' :
+                      'bg-orange-100 text-orange-800'
                     }`}>
-                      {selectedBill.status}
+                      {selectedBill.is_overdue ? 'Overdue' : selectedBill.status}
                     </span>
                   </div>
+                  {selectedBill.penalty_fee_amount > 0 && (
+                    <div className="col-span-2">
+                      <span className="text-red-600 font-medium">Penalty Fee Applied:</span>
+                      <span className="ml-2 text-red-600 font-medium">{formatCurrency(selectedBill.penalty_fee_amount)}</span>
+                      <span className="ml-2 text-xs text-gray-500">(1% late payment fee)</span>
+                    </div>
+                  )}
                 </div>
               </div>
 
@@ -1006,6 +1127,49 @@ export default function BillingPage() {
                     </p>
                   </div>
                 )}
+
+                {/* Actual Payment Date */}
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">
+                    Actual Payment Date *
+                  </label>
+                  <input
+                    type="date"
+                    value={paymentFormData.actual_payment_date}
+                    onChange={(e) => setPaymentFormData(prev => ({...prev, actual_payment_date: e.target.value}))}
+                    className="block w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-blue-500 focus:border-blue-500"
+                    required
+                  />
+                  <p className="text-xs text-gray-500 mt-1">
+                    Date when tenant actually made the payment. Late payments (more than 10 days after bill date) will incur a 1% penalty fee.
+                  </p>
+                </div>
+
+                {/* Penalty Fee Warning */}
+                {(() => {
+                  const penaltyFee = calculatePenaltyFee(selectedBill, paymentFormData.actual_payment_date)
+                  if (penaltyFee > 0) {
+                    return (
+                      <div className="bg-red-50 border border-red-200 rounded-md p-3">
+                        <div className="flex">
+                          <svg className="h-5 w-5 text-red-400 mr-2" fill="currentColor" viewBox="0 0 20 20">
+                            <path fillRule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clipRule="evenodd" />
+                          </svg>
+                          <div>
+                            <h4 className="text-sm font-medium text-red-800">Late Payment Penalty</h4>
+                            <p className="text-sm text-red-700 mt-1">
+                              A 1% penalty fee of <strong>{formatCurrency(penaltyFee)}</strong> will be added to this bill for late payment.
+                            </p>
+                            <p className="text-xs text-red-600 mt-1">
+                              New total: <strong>{formatCurrency(parseFloat(selectedBill.total_amount) + penaltyFee)}</strong>
+                            </p>
+                          </div>
+                        </div>
+                      </div>
+                    )
+                  }
+                  return null
+                })()}
 
                 {/* Notes */}
                 <div>

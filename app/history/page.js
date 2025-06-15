@@ -197,7 +197,7 @@ export default function HistoryPage() {
                             {formatCurrency(bill.total_amount)}
                           </p>
                           <p className="text-sm text-gray-500">
-                            Paid: {formatDate(bill.updated_at)}
+                            Paid: {formatDate(bill.actual_payment_date || bill.last_payment_date || bill.updated_at)}
                           </p>
                         </div>
                       </div>

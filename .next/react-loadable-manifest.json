@@ -1,20 +1,20 @@
 {
   "app\\dashboard\\page.js -> ../../lib/api": {
-    "id": "app\\dashboard\\page.js -> ../../lib/api",
+    "id": 2617,
     "files": [
-      "static/chunks/_app-pages-browser_lib_api_js.js"
+      "static/chunks/617.a8123bbea172c69d.js"
     ]
   },
   "app\\rooms\\page.js -> ../../lib/api": {
-    "id": "app\\rooms\\page.js -> ../../lib/api",
+    "id": 2617,
     "files": [
-      "static/chunks/_app-pages-browser_lib_api_js.js"
+      "static/chunks/617.a8123bbea172c69d.js"
     ]
   },
   "app\\tenants\\page.js -> ../../lib/api": {
-    "id": "app\\tenants\\page.js -> ../../lib/api",
+    "id": 2617,
     "files": [
-      "static/chunks/_app-pages-browser_lib_api_js.js"
+      "static/chunks/617.a8123bbea172c69d.js"
     ]
   }
 }

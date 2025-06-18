@@ -14,18 +14,58 @@ export async function GET(request) {
       )
     }
 
-    // Get all tenants with room and branch details
-    const [tenants] = await pool.execute(`
+    // Get all active tenants with room, branch details, billing cycle progress, and deposit information
+    const result = await pool.query(`
       SELECT 
         t.*,
         r.room_number,
         r.monthly_rent,
-        b.name as branch_name
+        b.name as branch_name,
+        -- Get advance deposit information
+        COALESCE(adv_dep.initial_amount, 0) as advance_payment,
+        COALESCE(adv_dep.remaining_balance, 0) as advance_remaining,
+        COALESCE(adv_dep.status, 'unpaid') as advance_payment_status,
+        -- Get security deposit information
+        COALESCE(sec_dep.initial_amount, 0) as security_deposit,
+        COALESCE(sec_dep.remaining_balance, 0) as security_remaining,
+        COALESCE(sec_dep.status, 'unpaid') as security_deposit_status,
+        -- Count paid billing cycles from bill_history (archived paid bills)
+        COALESCE(
+          (SELECT COUNT(*) 
+           FROM bill_history bh 
+           WHERE bh.original_tenant_id = t.id 
+           AND bh.status = 'paid'
+           AND bh.is_final_bill = false), 
+          0
+        ) as paid_cycles_count,
+        -- Use completed_cycles field or fallback to 0
+        COALESCE(t.completed_cycles, 0) as completed_cycles,
+        -- Check if tenant has any final bill (contract completion indicator)
+        EXISTS(
+          SELECT 1 
+          FROM bill_history bh 
+          WHERE bh.original_tenant_id = t.id 
+          AND bh.is_final_bill = true
+        ) as has_final_bill,
+        -- Calculate contract progress percentage based on completed cycles vs total duration
+        CASE 
+          WHEN t.contract_duration_months > 0 THEN
+            ROUND(
+              (COALESCE(t.completed_cycles, 0) * 100.0 / t.contract_duration_months), 1
+            )
+          ELSE 0
+        END as contract_progress_percentage,
+        -- Calculate the correct cycle count for display (completed_cycles/contract_duration_months)
+        COALESCE(t.completed_cycles, 0)::text || '/' || t.contract_duration_months::text || ' cycles' as correct_cycles_display
       FROM tenants t
       LEFT JOIN rooms r ON t.room_id = r.id
       LEFT JOIN branches b ON r.branch_id = b.id
+      LEFT JOIN tenant_deposits adv_dep ON t.id = adv_dep.tenant_id AND adv_dep.deposit_type = 'advance'
+      LEFT JOIN tenant_deposits sec_dep ON t.id = sec_dep.tenant_id AND sec_dep.deposit_type = 'security'
+      WHERE t.status = 'active'
       ORDER BY t.name
     `)
+    const tenants = result.rows
 
     return NextResponse.json({
       success: true,
@@ -56,7 +96,6 @@ export async function POST(request) {
       name, 
       mobile, 
       email, 
-      address, 
       room_id, 
       rent_start,
       initial_electric_reading,
@@ -67,9 +106,62 @@ export async function POST(request) {
     } = await request.json()
 
     // Validation
-    if (!name || !mobile || !rent_start) {
+    if (!name || !mobile || !rent_start || !room_id || initial_electric_reading === undefined || initial_electric_reading === '') {
       return NextResponse.json(
-        { success: false, message: 'Name, mobile, and rent start date are required' },
+        { success: false, message: 'All fields are required: name, mobile, rent start date, room, and initial electric reading' },
+        { status: 400 }
+      )
+    }
+
+    // Format mobile number - add +63 prefix if not present and validate format
+    let formattedMobile = mobile.replace(/\D/g, '') // Remove all non-digits
+    
+    // If mobile starts with +63, remove it and get the 10 digits
+    if (mobile.startsWith('+63')) {
+      formattedMobile = mobile.slice(3).replace(/\D/g, '')
+    }
+    
+    // Validate mobile number format (should be exactly 10 digits starting with 9)
+    if (!/^9\d{9}$/.test(formattedMobile)) {
+      return NextResponse.json(
+        { success: false, message: 'Mobile number must be 10 digits starting with 9 (e.g., 9171234567)' },
+        { status: 400 }
+      )
+    }
+    
+    // Add +63 prefix for storage
+    const fullMobileNumber = `+63${formattedMobile}`
+
+    // Parse and validate numeric values
+    const parsedElectricReading = parseFloat(initial_electric_reading)
+    const parsedAdvancePayment = parseFloat(advance_payment || 3500.00)
+    const parsedSecurityDeposit = parseFloat(security_deposit || 3500.00)
+    const parsedRoomId = parseInt(room_id)
+
+    if (isNaN(parsedElectricReading) || parsedElectricReading < 0) {
+      return NextResponse.json(
+        { success: false, message: 'Initial electric reading must be a valid positive number' },
+        { status: 400 }
+      )
+    }
+
+    if (isNaN(parsedAdvancePayment) || parsedAdvancePayment <= 0) {
+      return NextResponse.json(
+        { success: false, message: 'Advance payment must be a valid positive amount' },
+        { status: 400 }
+      )
+    }
+
+    if (isNaN(parsedSecurityDeposit) || parsedSecurityDeposit <= 0) {
+      return NextResponse.json(
+        { success: false, message: 'Security deposit must be a valid positive amount' },
+        { status: 400 }
+      )
+    }
+
+    if (isNaN(parsedRoomId) || parsedRoomId <= 0) {
+      return NextResponse.json(
+        { success: false, message: 'Please select a valid room' },
         { status: 400 }
       )
     }
@@ -79,46 +171,68 @@ export async function POST(request) {
     const endDate = new Date(startDate)
     endDate.setMonth(endDate.getMonth() + 6)
 
-    // Insert new tenant with deposit information
-    const [result] = await pool.execute(`
+    // Insert new tenant without deposit information (deposits go to separate table)
+    const insertResult = await pool.query(`
       INSERT INTO tenants (
-        name, mobile, email, address, room_id, rent_start,
+        name, mobile, email, room_id, rent_start,
         contract_start_date, contract_end_date, contract_duration_months,
-        initial_electric_reading, contract_status,
-        advance_payment, security_deposit, 
-        advance_payment_status, security_deposit_status
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        initial_electric_reading, contract_status
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+      RETURNING id
     `, [
-      name, mobile, email || null, address || null, room_id || null, rent_start,
+      name, fullMobileNumber, email || null, parsedRoomId, rent_start,
       rent_start, endDate.toISOString().split('T')[0], 6,
-      initial_electric_reading || 0, 'active',
-      advance_payment || 3500.00, security_deposit || 3500.00,
-      advance_payment_status || 'unpaid', security_deposit_status || 'unpaid'
+      parsedElectricReading, 'active'
     ])
+    const insertId = insertResult.rows[0].id
+
+    // Create advance payment deposit record
+    const advanceStatus = advance_payment_status || 'unpaid'
+    await pool.query(`
+      INSERT INTO tenant_deposits (
+        tenant_id, deposit_type, initial_amount, remaining_balance, status
+      ) VALUES ($1, 'advance', $2, $3, $4)
+    `, [insertId, parsedAdvancePayment, advanceStatus === 'paid' ? parsedAdvancePayment : 0, advanceStatus === 'paid' ? 'active' : 'unpaid'])
+
+    // Create security deposit record
+    const securityStatus = security_deposit_status || 'unpaid'
+    await pool.query(`
+      INSERT INTO tenant_deposits (
+        tenant_id, deposit_type, initial_amount, remaining_balance, status
+      ) VALUES ($1, 'security', $2, $3, $4)
+    `, [insertId, parsedSecurityDeposit, securityStatus === 'paid' ? parsedSecurityDeposit : 0, securityStatus === 'paid' ? 'active' : 'unpaid'])
 
     // Update room status if room is assigned
-    if (room_id) {
-      await pool.execute(
-        'UPDATE rooms SET status = ? WHERE id = ?',
-        ['occupied', room_id]
-      )
-    }
+    await pool.query(
+      'UPDATE rooms SET status = $1 WHERE id = $2',
+      ['occupied', parsedRoomId]
+    )
 
-    // Get the newly created tenant with room details
-    const [newTenant] = await pool.execute(`
+    // Get the newly created tenant with room and deposit details
+    const newTenantResult = await pool.query(`
       SELECT 
         t.*,
         r.room_number,
         r.monthly_rent,
         b.name as branch_name,
-        b.address as branch_address
+        b.address as branch_address,
+        -- Get advance deposit information
+        COALESCE(adv_dep.initial_amount, 0) as advance_payment,
+        COALESCE(adv_dep.remaining_balance, 0) as advance_remaining,
+        COALESCE(adv_dep.status, 'unpaid') as advance_payment_status,
+        -- Get security deposit information
+        COALESCE(sec_dep.initial_amount, 0) as security_deposit,
+        COALESCE(sec_dep.remaining_balance, 0) as security_remaining,
+        COALESCE(sec_dep.status, 'unpaid') as security_deposit_status
       FROM tenants t
       LEFT JOIN rooms r ON t.room_id = r.id
       LEFT JOIN branches b ON r.branch_id = b.id
-      WHERE t.id = ?
-    `, [result.insertId])
+      LEFT JOIN tenant_deposits adv_dep ON t.id = adv_dep.tenant_id AND adv_dep.deposit_type = 'advance'
+      LEFT JOIN tenant_deposits sec_dep ON t.id = sec_dep.tenant_id AND sec_dep.deposit_type = 'security'
+      WHERE t.id = $1
+    `, [insertId])
 
-    const tenant = newTenant[0]
+    const tenant = newTenantResult.rows[0]
 
     // Send welcome email if tenant has email address
     let emailStatus = null
@@ -134,16 +248,16 @@ export async function POST(request) {
         await emailService.sendWelcomeEmail(tenant, roomInfo)
         
         // Mark welcome email as sent
-        await pool.execute(
-          'UPDATE tenants SET welcome_email_sent = TRUE WHERE id = ?',
+        await pool.query(
+          'UPDATE tenants SET welcome_email_sent = TRUE WHERE id = $1',
           [tenant.id]
         )
 
         // Log email notification
-        await pool.execute(`
+        await pool.query(`
           INSERT INTO email_notifications 
           (tenant_id, email_type, email_subject, recipient_email, status, sent_at) 
-          VALUES (?, 'welcome', 'Welcome to J&H Apartment', ?, 'sent', NOW())
+          VALUES ($1, 'welcome', 'Welcome to J&H Apartment', $2, 'sent', NOW())
         `, [tenant.id, tenant.email])
 
         emailStatus = { success: true, message: 'Welcome email sent successfully' }
@@ -152,10 +266,10 @@ export async function POST(request) {
         console.error('Failed to send welcome email:', emailError)
         
         // Log failed email attempt
-        await pool.execute(`
+        await pool.query(`
           INSERT INTO email_notifications 
           (tenant_id, email_type, email_subject, recipient_email, status, error_message) 
-          VALUES (?, 'welcome', 'Welcome to J&H Apartment', ?, 'failed', ?)
+          VALUES ($1, 'welcome', 'Welcome to J&H Apartment', $2, 'failed', $3)
         `, [tenant.id, tenant.email, emailError.message])
 
         emailStatus = { success: false, error: emailError.message }
@@ -163,8 +277,6 @@ export async function POST(request) {
     } else {
       emailStatus = { success: false, message: 'No email address provided' }
     }
-
-
 
     return NextResponse.json({
       success: true,

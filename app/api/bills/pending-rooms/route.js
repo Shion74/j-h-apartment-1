@@ -14,7 +14,7 @@ export async function GET(request) {
     }
 
     // Get all rooms with their enhanced billing status
-    const [rooms] = await pool.execute(`
+    const roomsResult = await pool.query(`
       SELECT 
         r.id as room_id,
         r.room_number,
@@ -28,177 +28,169 @@ export async function GET(request) {
         t.contract_start_date,
         t.contract_end_date,
         t.contract_status,
-        -- Get previous electric reading (from last bill or initial reading)
+        -- Get previous electric reading (from last active bill, bill history, or initial reading)
         COALESCE(
           (SELECT electric_present_reading 
            FROM bills 
            WHERE tenant_id = t.id 
            ORDER BY bill_date DESC 
-           LIMIT 1), 
+           LIMIT 1),
+          (SELECT electric_present_reading 
+           FROM bill_history 
+           WHERE original_tenant_id = t.id 
+           ORDER BY rent_to DESC 
+           LIMIT 1),
           t.initial_electric_reading,
           0
         ) as previous_reading,
-        -- Get previous reading date (from last bill or rent start date)
+        -- Get previous reading date (from last active bill, bill history, or rent start date)
         COALESCE(
           (SELECT electric_reading_date 
            FROM bills 
            WHERE tenant_id = t.id 
            ORDER BY bill_date DESC 
-           LIMIT 1), 
+           LIMIT 1),
+          (SELECT electric_reading_date 
+           FROM bill_history 
+           WHERE original_tenant_id = t.id 
+           ORDER BY rent_to DESC 
+           LIMIT 1),
           t.rent_start
         ) as previous_reading_date,
-        -- Calculate next billing period start based on tenant's billing cycle
+        -- Calculate next billing period start based on tenant's billing cycle (consider both active bills and history)
         CASE 
           WHEN t.rent_start IS NOT NULL THEN
             CASE 
-              -- If no bills exist, start from rent_start date
-              WHEN NOT EXISTS (SELECT 1 FROM bills WHERE tenant_id = t.id) THEN t.rent_start
-              -- If bills exist, start day after last bill ended
-              ELSE DATE_ADD(
-                (SELECT rent_to 
-                 FROM bills 
-                 WHERE tenant_id = t.id 
-                 ORDER BY bill_date DESC 
-                 LIMIT 1), 
-                INTERVAL 1 DAY
+              -- If no bills exist in active table, check bill history for last period
+              WHEN NOT EXISTS (SELECT 1 FROM bills WHERE tenant_id = t.id) THEN
+                CASE
+                  -- Check if bills exist in history for this tenant
+                  WHEN EXISTS (SELECT 1 FROM bill_history WHERE original_tenant_id = t.id) THEN
+                    (SELECT TO_CHAR(rent_to + INTERVAL '1 day', 'YYYY-MM-DD')
+                     FROM bill_history 
+                     WHERE original_tenant_id = t.id 
+                     ORDER BY rent_to DESC 
+                     LIMIT 1)
+                  -- No bills in history either, start from rent_start
+                  ELSE TO_CHAR(t.rent_start, 'YYYY-MM-DD')
+                END
+              -- If active bills exist, start day after last active bill ended
+              ELSE (
+                SELECT TO_CHAR(rent_to + INTERVAL '1 day', 'YYYY-MM-DD')
+                FROM bills 
+                WHERE tenant_id = t.id 
+                ORDER BY bill_date DESC 
+                LIMIT 1
               )
             END
-          ELSE CURDATE()
+          ELSE TO_CHAR(CURRENT_DATE, 'YYYY-MM-DD')
         END as next_period_start,
         -- Calculate next billing period end (maintains tenant's billing day pattern)
         CASE 
           WHEN t.rent_start IS NOT NULL THEN
             CASE 
-              -- For first bill: one month from rent_start, same day of month
+              -- If no active bills, check history for pattern
               WHEN NOT EXISTS (SELECT 1 FROM bills WHERE tenant_id = t.id) THEN
-                DATE_SUB(
-                  DATE_ADD(t.rent_start, INTERVAL 1 MONTH), 
-                  INTERVAL 1 DAY
-                )
-              -- For subsequent bills: one month from next period start, same day pattern
-              ELSE 
-                DATE_SUB(
-                  DATE_ADD(
-                    DATE_ADD(
-                      (SELECT rent_to 
-                       FROM bills 
-                       WHERE tenant_id = t.id 
-                       ORDER BY bill_date DESC 
-                       LIMIT 1), 
-                      INTERVAL 1 DAY
-                    ),
-                    INTERVAL 1 MONTH
-                  ),
-                  INTERVAL 1 DAY
-                )
+                CASE
+                  -- If history exists, continue from last history bill
+                  WHEN EXISTS (SELECT 1 FROM bill_history WHERE original_tenant_id = t.id) THEN
+                    (SELECT TO_CHAR((rent_to + INTERVAL '1 day') + INTERVAL '1 month' - INTERVAL '1 day', 'YYYY-MM-DD')
+                     FROM bill_history 
+                     WHERE original_tenant_id = t.id 
+                     ORDER BY rent_to DESC 
+                     LIMIT 1)
+                  -- No history, first bill: one month from rent_start
+                  ELSE TO_CHAR(t.rent_start + INTERVAL '1 month' - INTERVAL '1 day', 'YYYY-MM-DD')
+                END
+              -- Active bills exist, continue from last active bill
+              ELSE (
+                SELECT TO_CHAR((rent_to + INTERVAL '1 day') + INTERVAL '1 month' - INTERVAL '1 day', 'YYYY-MM-DD')
+                FROM bills 
+                WHERE tenant_id = t.id 
+                ORDER BY bill_date DESC 
+                LIMIT 1
+              )
             END
-          ELSE LAST_DAY(CURDATE())
+          ELSE TO_CHAR(DATE_TRUNC('month', CURRENT_DATE) + INTERVAL '1 month' - INTERVAL '1 day', 'YYYY-MM-DD')
         END as next_period_end,
-        -- Enhanced billing status logic
+        -- Enhanced billing status logic (consider both active bills and history)
         CASE 
           WHEN t.id IS NULL THEN 'no_tenant'
+          -- Check if tenant has unpaid bills (business rule: can't create new bills with unpaid bills)
+          WHEN EXISTS (
+            SELECT 1 FROM bills b2 
+            WHERE b2.tenant_id = t.id 
+            AND b2.status IN ('unpaid', 'partial')
+          ) THEN 'has_unpaid_bills'
+          -- Check if there's already a bill for the calculated next period
           WHEN EXISTS (
             SELECT 1 FROM bills b 
             WHERE b.tenant_id = t.id 
-            AND b.status IN ('unpaid', 'partial')
+            AND b.rent_from::date = (
+              CASE 
+                -- No active bills, check history for next period start
+                WHEN NOT EXISTS (SELECT 1 FROM bills WHERE tenant_id = t.id) THEN
+                  CASE
+                    WHEN EXISTS (SELECT 1 FROM bill_history WHERE original_tenant_id = t.id) THEN
+                      (SELECT (rent_to + INTERVAL '1 day')::date FROM bill_history WHERE original_tenant_id = t.id ORDER BY rent_to DESC LIMIT 1)
+                    ELSE t.rent_start::date
+                  END
+                -- Active bills exist, use last active bill
+                ELSE (SELECT (rent_to + INTERVAL '1 day')::date FROM bills WHERE tenant_id = t.id ORDER BY bill_date DESC LIMIT 1)
+              END
+            )
           ) THEN 'already_billed'
-          -- Check if cycle is ending (3 days before due date)
-          WHEN t.rent_start IS NOT NULL AND EXISTS (
-            SELECT 1 FROM bills b 
-            WHERE b.tenant_id = t.id 
-            AND b.status = 'paid'
-            AND DATEDIFF(
-              DATE_SUB(
-                DATE_ADD(
-                  DATE_ADD(b.rent_to, INTERVAL 1 DAY),
-                  INTERVAL 1 MONTH
-                ),
-                INTERVAL 1 DAY
-              ), 
-              CURDATE()
-            ) <= 3
-            AND DATEDIFF(
-              DATE_SUB(
-                DATE_ADD(
-                  DATE_ADD(b.rent_to, INTERVAL 1 DAY),
-                  INTERVAL 1 MONTH
-                ),
-                INTERVAL 1 DAY
-              ), 
-              CURDATE()
-            ) >= 0
-            ORDER BY b.bill_date DESC 
-            LIMIT 1
-          ) THEN 'needs_billing'
-          -- For first-time tenants, check if it's time for first bill (3 days before first cycle ends)
-          WHEN t.rent_start IS NOT NULL AND NOT EXISTS (
-            SELECT 1 FROM bills WHERE tenant_id = t.id
-          ) AND DATEDIFF(
-            DATE_SUB(
-              DATE_ADD(t.rent_start, INTERVAL 1 MONTH), 
-              INTERVAL 1 DAY
-            ), 
-            CURDATE()
-          ) <= 3
-          AND DATEDIFF(
-            DATE_SUB(
-              DATE_ADD(t.rent_start, INTERVAL 1 MONTH), 
-              INTERVAL 1 DAY
-            ), 
-            CURDATE()
-          ) >= 0 THEN 'needs_billing'
-          -- On due date, definitely needs billing
+          -- Check if billing cycle has ended and it's time to send bill
           WHEN t.rent_start IS NOT NULL AND (
-            -- First bill due date reached
-            (NOT EXISTS (SELECT 1 FROM bills WHERE tenant_id = t.id) 
-             AND CURDATE() >= DATE_SUB(DATE_ADD(t.rent_start, INTERVAL 1 MONTH), INTERVAL 1 DAY))
+            -- No active bills, check against history or initial period
+            (NOT EXISTS (SELECT 1 FROM bills WHERE tenant_id = t.id) AND (
+              -- If history exists, check if we're past the last history bill period
+              (EXISTS (SELECT 1 FROM bill_history WHERE original_tenant_id = t.id)
+               AND CURRENT_DATE > (SELECT rent_to FROM bill_history WHERE original_tenant_id = t.id ORDER BY rent_to DESC LIMIT 1))
+              OR
+              -- If no history, check if first period from rent_start has ended
+              (NOT EXISTS (SELECT 1 FROM bill_history WHERE original_tenant_id = t.id)
+               AND CURRENT_DATE > (t.rent_start + INTERVAL '1 month' - INTERVAL '1 day')::date)
+            ))
             OR
-            -- Subsequent bill due date reached
-            (EXISTS (SELECT 1 FROM bills WHERE tenant_id = t.id AND status = 'paid')
-             AND CURDATE() >= DATE_SUB(
-               DATE_ADD(
-                 DATE_ADD(
-                   (SELECT rent_to FROM bills WHERE tenant_id = t.id AND status = 'paid' ORDER BY bill_date DESC LIMIT 1), 
-                   INTERVAL 1 DAY
-                 ),
-                 INTERVAL 1 MONTH
-               ),
-               INTERVAL 1 DAY
-             ))
+            -- Active bills exist, check if last active cycle has ended
+            (EXISTS (SELECT 1 FROM bills WHERE tenant_id = t.id)
+             AND CURRENT_DATE > (SELECT rent_to FROM bills WHERE tenant_id = t.id ORDER BY bill_date DESC LIMIT 1))
           ) THEN 'needs_billing'
           ELSE 'up_to_date'
         END as billing_status,
-        -- Days until next due date (for display)
+        -- Days until next due date (for display) - consider both active bills and history
         CASE 
           WHEN t.rent_start IS NOT NULL THEN
             CASE 
+              -- If no active bills, check history for last period
               WHEN NOT EXISTS (SELECT 1 FROM bills WHERE tenant_id = t.id) THEN
-                DATEDIFF(
-                  DATE_SUB(DATE_ADD(t.rent_start, INTERVAL 1 MONTH), INTERVAL 1 DAY), 
-                  CURDATE()
-                )
+                CASE
+                  -- If history exists, calculate from last history bill
+                  WHEN EXISTS (SELECT 1 FROM bill_history WHERE original_tenant_id = t.id) THEN
+                    EXTRACT(DAY FROM (
+                      SELECT (rent_to + INTERVAL '1 day' + INTERVAL '1 month' - INTERVAL '1 day') - CURRENT_DATE 
+                      FROM bill_history 
+                      WHERE original_tenant_id = t.id 
+                      ORDER BY rent_to DESC 
+                      LIMIT 1
+                    ))
+                  -- No history, calculate from initial rent_start
+                  ELSE EXTRACT(DAY FROM (t.rent_start + INTERVAL '1 month' - INTERVAL '1 day') - CURRENT_DATE)
+                END
+              -- Active bills exist, calculate from last active bill
               ELSE 
-                DATEDIFF(
-                  DATE_SUB(
-                    DATE_ADD(
-                      DATE_ADD(
-                        (SELECT rent_to FROM bills WHERE tenant_id = t.id ORDER BY bill_date DESC LIMIT 1), 
-                        INTERVAL 1 DAY
-                      ),
-                      INTERVAL 1 MONTH
-                    ),
-                    INTERVAL 1 DAY
-                  ), 
-                  CURDATE()
-                )
+                EXTRACT(DAY FROM (SELECT (rent_to + INTERVAL '1 day' + INTERVAL '1 month' - INTERVAL '1 day') - CURRENT_DATE FROM bills WHERE tenant_id = t.id ORDER BY bill_date DESC LIMIT 1))
             END
           ELSE NULL
         END as days_until_due
       FROM rooms r
       LEFT JOIN branches b ON r.branch_id = b.id
-      LEFT JOIN tenants t ON r.id = t.room_id AND t.contract_status = 'active'
+      LEFT JOIN tenants t ON r.id = t.room_id AND (t.contract_status = 'active' OR t.contract_status = 'renewed')
       ORDER BY b.name, r.room_number
     `)
+
+    const rooms = roomsResult.rows
 
     return NextResponse.json({
       success: true,

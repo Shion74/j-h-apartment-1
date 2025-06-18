@@ -14,12 +14,13 @@ export async function GET(request) {
     }
 
     // Get all settings
-    const [settings] = await pool.execute(`
+    const settingsResult = await pool.query(`
       SELECT setting_key, setting_value, setting_type, description 
       FROM system_settings 
       ORDER BY setting_key
     `)
 
+    const settings = settingsResult.rows
     // Format settings into object
     const settingsObj = {}
     settings.forEach(setting => {
@@ -74,9 +75,9 @@ export async function PUT(request) {
     }
 
     // Update or insert setting
-    await pool.execute(`
+    await pool.query(`
       INSERT INTO system_settings (setting_key, setting_value, setting_type) 
-      VALUES (?, ?, ?)
+      VALUES ($1, $2, $1) RETURNING id
       ON DUPLICATE KEY UPDATE 
       setting_value = VALUES(setting_value),
       setting_type = VALUES(setting_type),

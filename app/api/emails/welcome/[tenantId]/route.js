@@ -25,14 +25,15 @@ export async function POST(request, { params }) {
     }
 
     // Get tenant information
-    const [tenants] = await pool.execute(`
+    const tenantsResult = await pool.query(`
       SELECT t.*, r.room_number, r.monthly_rent, b.name as branch_name
       FROM tenants t
       LEFT JOIN rooms r ON t.room_id = r.id
       LEFT JOIN branches b ON r.branch_id = b.id
-      WHERE t.id = ?
+      WHERE t.id = $1
     `, [tenantId])
 
+    const tenants = tenantsResult.rows
     if (tenants.length === 0) {
       return NextResponse.json(
         { success: false, message: 'Tenant not found' },
@@ -51,13 +52,19 @@ export async function POST(request, { params }) {
     }
 
     // Send welcome email
-    await emailService.sendWelcomeEmail(tenant)
+    const roomInfo = {
+      room_number: tenant.room_number,
+      monthly_rent: tenant.monthly_rent,
+      branch_name: tenant.branch_name
+    }
+    
+    await emailService.sendWelcomeEmail(tenant, roomInfo)
 
     // Log email notification
-    await pool.execute(`
+    await pool.query(`
       INSERT INTO email_notifications 
       (tenant_id, email_type, email_subject, recipient_email, status, sent_at) 
-      VALUES (?, 'welcome', 'Welcome to J&H Apartment', ?, 'sent', NOW())
+      VALUES ($1, 'welcome', 'Welcome to J&H Apartment', $2, 'sent', NOW())
     `, [tenant.id, tenant.email])
 
     return NextResponse.json({
@@ -78,11 +85,22 @@ export async function POST(request, { params }) {
     // Log failed email attempt
     if (params.tenantId) {
       try {
-        await pool.execute(`
+        // Try to get tenant email for logging, but use fallback if not available
+        let tenantEmail = 'unknown'
+        try {
+          const emailResult = await pool.query('SELECT email FROM tenants WHERE id = $1', [params.tenantId])
+          if (emailResult.rows.length > 0) {
+            tenantEmail = emailResult.rows[0].email || 'unknown'
+          }
+        } catch (emailLookupError) {
+          // Use fallback if can't get tenant email
+        }
+        
+        await pool.query(`
           INSERT INTO email_notifications 
           (tenant_id, email_type, email_subject, recipient_email, status, error_message) 
-          VALUES (?, 'welcome', 'Welcome to J&H Apartment', ?, 'failed', ?)
-        `, [params.tenantId, 'unknown', error.message])
+          VALUES ($1, 'welcome', 'Welcome to J&H Apartment', $2, 'failed', $3)
+        `, [params.tenantId, tenantEmail, error.message])
       } catch (logError) {
         console.error('Failed to log email error:', logError)
       }
@@ -93,4 +111,4 @@ export async function POST(request, { params }) {
       { status: 500 }
     )
   }
-} 
+}

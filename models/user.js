@@ -1,16 +1,16 @@
-const bcrypt = require('bcrypt');
-const jwt = require('jsonwebtoken');
-const { pool } = require('../config/database');
+import bcrypt from 'bcrypt';
+import jwt from 'jsonwebtoken';
+import { pool } from '../lib/database.js';
 
 class User {
   // Get user by username
   static async findByUsername(username) {
     try {
-      const [rows] = await pool.execute(
-        'SELECT * FROM users WHERE username = ?',
+      const result = await pool.query(
+        'SELECT * FROM users WHERE username = $1',
         [username]
       );
-      return rows.length ? rows[0] : null;
+      return result.rows.length ? result.rows[0] : null;
     } catch (error) {
       console.error('Error finding user by username:', error);
       throw error;
@@ -20,11 +20,11 @@ class User {
   // Get user by id
   static async findById(id) {
     try {
-      const [rows] = await pool.execute(
-        'SELECT id, username, role FROM users WHERE id = ?',
+      const result = await pool.query(
+        'SELECT id, username, role FROM users WHERE id = $1',
         [id]
       );
-      return rows.length ? rows[0] : null;
+      return result.rows.length ? result.rows[0] : null;
     } catch (error) {
       console.error('Error finding user by id:', error);
       throw error;
@@ -40,13 +40,13 @@ class User {
       const hashedPassword = await bcrypt.hash(password, 10);
       
       // Insert new user
-      const [result] = await pool.execute(
-        'INSERT INTO users (username, password, role) VALUES (?, ?, ?)',
+      const result = await pool.query(
+        'INSERT INTO users (username, password, role) VALUES ($1, $2, $3) RETURNING id',
         [username, hashedPassword, role]
       );
       
       return {
-        id: result.insertId,
+        id: result.rows[0].id,
         username,
         role
       };
@@ -97,10 +97,10 @@ class User {
   // Get all users
   static async findAll() {
     try {
-      const [rows] = await pool.execute(
+      const result = await pool.query(
         'SELECT id, username, role, created_at FROM users'
       );
-      return rows;
+      return result.rows;
     } catch (error) {
       console.error('Error getting all users:', error);
       throw error;
@@ -108,4 +108,4 @@ class User {
   }
 }
 
-module.exports = User; 
+export default User; 

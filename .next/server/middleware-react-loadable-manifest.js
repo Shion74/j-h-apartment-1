@@ -1,1 +1,1 @@
-self.__REACT_LOADABLE_MANIFEST="{}"
+self.__REACT_LOADABLE_MANIFEST="{\"app\\\\dashboard\\\\page.js -> ../../lib/api\":{\"id\":\"app\\\\dashboard\\\\page.js -> ../../lib/api\",\"files\":[\"static/chunks/_app-pages-browser_lib_api_js.js\"]},\"app\\\\rooms\\\\page.js -> ../../lib/api\":{\"id\":\"app\\\\rooms\\\\page.js -> ../../lib/api\",\"files\":[\"static/chunks/_app-pages-browser_lib_api_js.js\"]},\"app\\\\tenants\\\\page.js -> ../../lib/api\":{\"id\":\"app\\\\tenants\\\\page.js -> ../../lib/api\",\"files\":[\"static/chunks/_app-pages-browser_lib_api_js.js\"]}}"

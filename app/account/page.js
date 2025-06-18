@@ -85,12 +85,12 @@ export default function AccountPage() {
     e.preventDefault()
     
     if (accountForm.newPassword && accountForm.newPassword !== accountForm.confirmPassword) {
-      toast.error('New passwords do not match')
+              toast.error('Passwords do not match')
       return
     }
 
     if (accountForm.newPassword && accountForm.newPassword.length < 6) {
-      toast.error('New password must be at least 6 characters long')
+              toast.error('Password too short')
       return
     }
 
@@ -113,7 +113,7 @@ export default function AccountPage() {
       const data = await response.json()
 
       if (data.success) {
-        toast.success('Account updated successfully')
+        toast.success('Account updated')
         
         // Update local storage with new user data
         const updatedUser = { ...user, username: accountForm.username, email: accountForm.email }
@@ -155,7 +155,7 @@ export default function AccountPage() {
       const data = await response.json()
 
       if (data.success) {
-        toast.success('Email settings updated successfully')
+        toast.success('Email settings updated')
       } else {
         toast.error(data.message || 'Failed to update email settings')
       }
@@ -182,7 +182,7 @@ export default function AccountPage() {
       const data = await response.json()
 
       if (data.success) {
-        toast.success('Email connection test successful!')
+        toast.success('Email test successful')
       } else {
         toast.error(data.message || 'Email connection test failed')
       }
@@ -206,7 +206,7 @@ export default function AccountPage() {
 
   return (
     <>
-      <Toaster position="top-right" />
+              <Toaster position="top-center" />
       <DashboardLayout>
         <div className="px-4 sm:px-6 lg:px-8 pb-6">
           {/* Header */}

@@ -15,44 +15,85 @@ export async function GET(request) {
 
     const { searchParams } = new URL(request.url)
     const month = searchParams.get('month') || new Date().toISOString().slice(0, 7) // YYYY-MM format
-    const year = month.split('-')[0]
-    const monthNum = month.split('-')[1]
+    const year = parseInt(month.split('-')[0])
+    const monthNum = parseInt(month.split('-')[1])
 
-    // Get month start and end dates
-    const monthStart = `${month}-01`
-    const monthEnd = new Date(year, monthNum, 0).toISOString().slice(0, 10)
+    // Get month start and end dates for calendar reference
+    const calendarMonthStart = `${month}-01`
+    const calendarMonthEnd = new Date(year, monthNum, 0).toISOString().slice(0, 10)
 
-    // 1. Financial Summary
-    const [financialData] = await pool.execute(`
+    // For billing cycle approach: 
+    // - Revenue: Based on payments made during the calendar month
+    // - Billing: Based on billing cycles that END during the calendar month (rent_to within month)
+    // - This aligns with when tenants are expected to pay and when revenue is actually collected
+    
+    console.log(`📊 Generating billing cycle report for ${month}`)
+    console.log(`📅 Calendar boundaries: ${calendarMonthStart} to ${calendarMonthEnd}`)
+    console.log(`🏠 Looking for billing cycles ending in this month and payments made in this month`)
+
+    // 1. Financial Summary - Billing Cycle Based
+    // Revenue: Payments made during the calendar month
+    // Billing: Bills for cycles ending during the calendar month (rent_to within month)
+    const financialDataResult = await pool.query(`
+      WITH all_payments AS (
+        SELECT bill_id, payment_date, amount, id FROM payments
+        UNION ALL
+        SELECT original_bill_id as bill_id, payment_date, amount, original_payment_id as id FROM payment_history
+      ),
+      all_bills AS (
+        SELECT id, bill_date, total_amount, status, rent_from, rent_to FROM bills
+        UNION ALL
+        SELECT original_bill_id as id, bill_date, total_amount, status, rent_from, rent_to FROM bill_history
+      ),
+      billing_cycles_ending_this_month AS (
+        -- Bills for billing cycles that END in this calendar month
+        SELECT * FROM all_bills 
+        WHERE rent_to BETWEEN $1 AND $2
+      ),
+      payments_made_this_month AS (
+        -- Payments actually made during this calendar month
+        SELECT * FROM all_payments 
+        WHERE payment_date BETWEEN $3 AND $4
+      )
       SELECT 
-        COALESCE(SUM(CASE WHEN p.payment_date BETWEEN ? AND ? THEN p.amount END), 0) as total_revenue,
-        COALESCE(SUM(CASE WHEN b.bill_date BETWEEN ? AND ? THEN b.total_amount END), 0) as total_billed,
-        COALESCE(SUM(CASE WHEN b.bill_date BETWEEN ? AND ? AND b.status = 'unpaid' THEN b.total_amount END), 0) as unpaid_amount,
-        COALESCE(SUM(CASE WHEN b.bill_date BETWEEN ? AND ? AND b.status = 'partial' THEN b.total_amount - COALESCE(paid_amounts.total_paid, 0) END), 0) as partial_amount,
-        COUNT(DISTINCT CASE WHEN p.payment_date BETWEEN ? AND ? THEN p.id END) as total_transactions,
-        COUNT(DISTINCT CASE WHEN b.bill_date BETWEEN ? AND ? THEN b.id END) as bills_generated
-      FROM bills b
-      LEFT JOIN payments p ON b.id = p.bill_id
+        -- Revenue: Actual payments received this month
+        COALESCE(SUM(pmtm.amount), 0) as total_revenue,
+        -- Billing: Bills for cycles ending this month (what tenants should pay)
+        COALESCE(SUM(bcem.total_amount), 0) as total_billed,
+        -- Unpaid: From current unpaid bills where cycle ended this month
+        COALESCE(SUM(CASE WHEN bcem.status = 'unpaid' THEN bcem.total_amount END), 0) as unpaid_amount,
+        -- Partial: From current partial bills where cycle ended this month
+        COALESCE(SUM(CASE WHEN bcem.status = 'partial' THEN bcem.total_amount - COALESCE(paid_amounts.total_paid, 0) END), 0) as partial_amount,
+        -- Transactions: Payment count this month
+        COUNT(DISTINCT pmtm.id) as total_transactions,
+        -- Bills: Billing cycles ending this month
+        COUNT(DISTINCT bcem.id) as bills_generated,
+        -- Cycle info for debugging
+        COUNT(DISTINCT bcem.id) as cycles_ending_this_month,
+        COUNT(DISTINCT pmtm.id) as payments_this_month
+      FROM billing_cycles_ending_this_month bcem
+      FULL OUTER JOIN payments_made_this_month pmtm ON bcem.id = pmtm.bill_id
+      LEFT JOIN bills b ON bcem.id = b.id
       LEFT JOIN (
         SELECT bill_id, SUM(amount) as total_paid
         FROM payments
         GROUP BY bill_id
       ) paid_amounts ON b.id = paid_amounts.bill_id
-    `, [monthStart, monthEnd, monthStart, monthEnd, monthStart, monthEnd, monthStart, monthEnd, monthStart, monthEnd, monthStart, monthEnd])
+    `, [calendarMonthStart, calendarMonthEnd, calendarMonthStart, calendarMonthEnd])
 
     // 2. Tenant Statistics
-    const [tenantStats] = await pool.execute(`
+    const tenantStatsResult = await pool.query(`
       SELECT 
-        COUNT(CASE WHEN t.rent_start BETWEEN ? AND ? THEN 1 END) as new_tenants,
-        COUNT(CASE WHEN th.deleted_at BETWEEN ? AND ? THEN 1 END) as departed_tenants,
+        COUNT(CASE WHEN t.rent_start BETWEEN $1 AND $2 THEN 1 END) as new_tenants,
+        COUNT(CASE WHEN th.deleted_at BETWEEN $3 AND $4 THEN 1 END) as departed_tenants,
         COUNT(CASE WHEN t.contract_status = 'active' THEN 1 END) as active_tenants,
-        COUNT(CASE WHEN t.contract_end_date BETWEEN ? AND DATE_ADD(?, INTERVAL 30 DAY) THEN 1 END) as expiring_contracts
+        COUNT(CASE WHEN t.contract_end_date BETWEEN $5 AND ($6::date + INTERVAL '30 days') THEN 1 END) as expiring_contracts
       FROM tenants t
       LEFT JOIN tenant_history th ON th.original_tenant_id = t.id
-    `, [monthStart, monthEnd, monthStart, monthEnd, monthEnd, monthEnd])
+    `, [calendarMonthStart, calendarMonthEnd, calendarMonthStart, calendarMonthEnd, calendarMonthEnd, calendarMonthEnd])
 
     // 3. Room Occupancy
-    const [roomStats] = await pool.execute(`
+    const roomStatsResult = await pool.query(`
       SELECT 
         COUNT(*) as total_rooms,
         COUNT(CASE WHEN r.status = 'occupied' THEN 1 END) as occupied_rooms,
@@ -61,54 +102,75 @@ export async function GET(request) {
       FROM rooms r
     `)
 
-    // 4. Branch Performance
-    const [branchPerformance] = await pool.execute(`
+    // 4. Branch Performance - Based on payments made this month
+    const branchPerformanceResult = await pool.query(`
+      WITH all_payments AS (
+        SELECT bill_id, payment_date, amount FROM payments
+        UNION ALL
+        SELECT original_bill_id as bill_id, payment_date, amount FROM payment_history
+      )
       SELECT 
         br.name as branch_name,
         COUNT(r.id) as total_rooms,
         COUNT(CASE WHEN r.status = 'occupied' THEN 1 END) as occupied_rooms,
-        COALESCE(SUM(CASE WHEN p.payment_date BETWEEN ? AND ? THEN p.amount END), 0) as branch_revenue,
-        COUNT(DISTINCT CASE WHEN t.rent_start BETWEEN ? AND ? THEN t.id END) as new_tenants_count
+        COALESCE(SUM(CASE WHEN ap.payment_date BETWEEN $1 AND $2 THEN ap.amount END), 0) as branch_revenue,
+        COUNT(DISTINCT CASE WHEN t.rent_start BETWEEN $3 AND $4 THEN t.id END) as new_tenants_count
       FROM branches br
       LEFT JOIN rooms r ON br.id = r.branch_id
       LEFT JOIN tenants t ON r.id = t.room_id
       LEFT JOIN bills b ON t.id = b.tenant_id
-      LEFT JOIN payments p ON b.id = p.bill_id
+      LEFT JOIN all_payments ap ON b.id = ap.bill_id
       GROUP BY br.id, br.name
       ORDER BY branch_revenue DESC
-    `, [monthStart, monthEnd, monthStart, monthEnd])
+    `, [calendarMonthStart, calendarMonthEnd, calendarMonthStart, calendarMonthEnd])
 
-    // 5. Payment Method Analysis
-    const [paymentMethods] = await pool.execute(`
+    // 5. Payment Method Analysis - Payments made this month
+    const paymentMethodsResult = await pool.query(`
+      WITH all_payments AS (
+        SELECT payment_method::text as payment_method, payment_date, amount FROM payments
+        UNION ALL
+        SELECT payment_method::text as payment_method, payment_date, amount FROM payment_history
+      )
       SELECT 
-        p.payment_method,
+        payment_method,
         COUNT(*) as transaction_count,
-        SUM(p.amount) as total_amount
-      FROM payments p
-      WHERE p.payment_date BETWEEN ? AND ?
-      GROUP BY p.payment_method
+        SUM(amount) as total_amount
+      FROM all_payments
+      WHERE payment_date BETWEEN $1 AND $2
+      GROUP BY payment_method
       ORDER BY total_amount DESC
-    `, [monthStart, monthEnd])
+    `, [calendarMonthStart, calendarMonthEnd])
 
-    // 6. Top Performing Metrics
-    const [topMetrics] = await pool.execute(`
+    // 6. Top Performing Metrics - Based on payments made this month
+    const topMetricsResult = await pool.query(`
+      WITH all_payments AS (
+        SELECT bill_id, payment_date, amount FROM payments
+        UNION ALL
+        SELECT original_bill_id as bill_id, payment_date, amount FROM payment_history
+      ),
+      all_bills AS (
+        SELECT id, tenant_id FROM bills
+        UNION ALL
+        SELECT original_bill_id as id, original_tenant_id as tenant_id FROM bill_history
+      )
       SELECT 
         'highest_paying_tenant' as metric_type,
-        t.name as tenant_name,
-        r.room_number,
-        SUM(p.amount) as total_paid
-      FROM payments p
-      JOIN bills b ON p.bill_id = b.id
-      JOIN tenants t ON b.tenant_id = t.id
-      JOIN rooms r ON t.room_id = r.id
-      WHERE p.payment_date BETWEEN ? AND ?
-      GROUP BY t.id, t.name, r.room_number
+        COALESCE(t.name, bh.tenant_name) as tenant_name,
+        COALESCE(r.room_number, bh.room_number) as room_number,
+        SUM(ap.amount) as total_paid
+      FROM all_payments ap
+      JOIN all_bills ab ON ap.bill_id = ab.id
+      LEFT JOIN tenants t ON ab.tenant_id = t.id
+      LEFT JOIN rooms r ON t.room_id = r.id
+      LEFT JOIN bill_history bh ON ab.id = bh.original_bill_id
+      WHERE ap.payment_date BETWEEN $1 AND $2
+      GROUP BY COALESCE(t.id, bh.original_tenant_id), COALESCE(t.name, bh.tenant_name), COALESCE(r.room_number, bh.room_number)
       ORDER BY total_paid DESC
       LIMIT 5
-    `, [monthStart, monthEnd])
+    `, [calendarMonthStart, calendarMonthEnd])
 
     // 7. Outstanding Bills Summary
-    const [outstandingBills] = await pool.execute(`
+    const outstandingBillsResult = await pool.query(`
       SELECT 
         COUNT(CASE WHEN b.status = 'unpaid' THEN 1 END) as unpaid_bills_count,
         COUNT(CASE WHEN b.status = 'partial' THEN 1 END) as partial_bills_count,
@@ -123,18 +185,71 @@ export async function GET(request) {
       WHERE b.status IN ('unpaid', 'partial')
     `)
 
-    // 8. Monthly Trends (compare with previous month)
+    // 8. Monthly Trends (compare with previous month) - Based on payment dates
     const prevMonth = new Date(year, monthNum - 2, 1).toISOString().slice(0, 7)
     const prevMonthStart = `${prevMonth}-01`
     const prevMonthEnd = new Date(year, monthNum - 1, 0).toISOString().slice(0, 10)
 
-    const [previousMonthData] = await pool.execute(`
+    const previousMonthDataResult = await pool.query(`
+      WITH all_payments AS (
+        SELECT amount, payment_date, id FROM payments
+        UNION ALL
+        SELECT amount, payment_date, original_payment_id as id FROM payment_history
+      )
       SELECT 
-        COALESCE(SUM(p.amount), 0) as prev_revenue,
-        COUNT(DISTINCT p.id) as prev_transactions
-      FROM payments p
-      WHERE p.payment_date BETWEEN ? AND ?
+        COALESCE(SUM(amount), 0) as prev_revenue,
+        COUNT(DISTINCT id) as prev_transactions
+      FROM all_payments
+      WHERE payment_date BETWEEN $1 AND $2
     `, [prevMonthStart, prevMonthEnd])
+
+    // Extract results
+    const financialData = financialDataResult.rows
+    const tenantStats = tenantStatsResult.rows
+    const roomStats = roomStatsResult.rows
+    const branchPerformance = branchPerformanceResult.rows
+    const paymentMethods = paymentMethodsResult.rows
+    const topMetrics = topMetricsResult.rows
+    const outstandingBills = outstandingBillsResult.rows
+    const previousMonthData = previousMonthDataResult.rows
+
+    // Check if this month has any data
+    const hasData = financialData[0].total_revenue > 0 || financialData[0].total_billed > 0 || financialData[0].total_transactions > 0
+
+        // If no data exists, get available months for suggestions based on billing cycles
+    let availableMonths = []
+    if (!hasData) {
+      console.log(`📊 No billing cycles ending in ${month}. Checking available months...`)
+      const availableMonthsResult = await pool.query(`
+        WITH all_bills AS (
+          SELECT rent_to FROM bills
+          UNION ALL
+          SELECT rent_to FROM bill_history
+        ),
+        all_payments AS (
+          SELECT payment_date FROM payments
+          UNION ALL
+          SELECT payment_date FROM payment_history
+        ),
+        billing_months AS (
+          SELECT DISTINCT TO_CHAR(rent_to, 'YYYY-MM') as month
+          FROM all_bills
+          WHERE rent_to IS NOT NULL
+        ),
+        payment_months AS (
+          SELECT DISTINCT TO_CHAR(payment_date, 'YYYY-MM') as month
+          FROM all_payments
+          WHERE payment_date IS NOT NULL
+        )
+        SELECT month FROM billing_months
+        UNION
+        SELECT month FROM payment_months
+        ORDER BY month DESC
+        LIMIT 12
+      `)
+      availableMonths = availableMonthsResult.rows.map(row => row.month)
+      console.log(`📅 Available months with billing cycles or payments: ${availableMonths.join(', ')}`)
+    }
 
     // Calculate growth rates
     const currentRevenue = financialData[0].total_revenue
@@ -143,14 +258,27 @@ export async function GET(request) {
       ? ((currentRevenue - previousRevenue) / previousRevenue * 100).toFixed(2)
       : 0
 
+    // Debug information
+    console.log(`💰 Financial Summary for ${month}:`)
+    console.log(`   Revenue (payments made): ₱${currentRevenue}`)
+    console.log(`   Billed (cycles ending): ₱${financialData[0].total_billed}`)
+    console.log(`   Cycles ending this month: ${financialData[0].cycles_ending_this_month || 0}`)
+    console.log(`   Payments this month: ${financialData[0].payments_this_month || 0}`)
+    console.log(`   Transactions: ${financialData[0].total_transactions}`)
+    console.log(`   Bills generated: ${financialData[0].bills_generated}`)
+
     // Compile the report
     const monthlyReport = {
       report_period: {
         month: month,
         month_name: new Date(year, monthNum - 1).toLocaleDateString('en-US', { month: 'long', year: 'numeric' }),
-        start_date: monthStart,
-        end_date: monthEnd,
-        generated_at: new Date().toISOString()
+        start_date: calendarMonthStart,
+        end_date: calendarMonthEnd,
+        generated_at: new Date().toISOString(),
+        has_data: hasData,
+        available_months: hasData ? [] : availableMonths,
+        report_type: 'billing_cycle_based',
+        description: 'Revenue based on payments made during the month. Billing based on tenant cycles ending during the month.'
       },
       financial_summary: {
         total_revenue: parseFloat(financialData[0].total_revenue),

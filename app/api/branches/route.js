@@ -13,17 +13,23 @@ export async function GET(request) {
       )
     }
 
-    // Get all branches with room count
-    const [branches] = await pool.execute(`
-      SELECT b.*, 
+    // Get all branches with room count and rates
+    const branchesResult = await pool.query(`
+      SELECT b.id, b.name, b.address, b.description,
+             COALESCE(b.monthly_rent, 3500.00) as monthly_rent,
+             COALESCE(b.water_rate, 200.00) as water_rate,
+             COALESCE(b.electricity_rate, 12.00) as electricity_rate,
+             b.created_at, b.updated_at,
              COUNT(r.id) as total_rooms,
              COUNT(CASE WHEN r.status = 'occupied' THEN 1 END) as occupied_rooms,
              COUNT(CASE WHEN r.status = 'vacant' THEN 1 END) as vacant_rooms
       FROM branches b
       LEFT JOIN rooms r ON b.id = r.branch_id
-      GROUP BY b.id
+      GROUP BY b.id, b.name, b.address, b.description, b.monthly_rent, b.water_rate, b.electricity_rate, b.created_at, b.updated_at
       ORDER BY b.name
     `)
+
+    const branches = branchesResult.rows
 
     return NextResponse.json({
       success: true,
@@ -106,11 +112,12 @@ export async function POST(request) {
     }
 
     // Check if branch name already exists
-    const [existingBranches] = await pool.execute(
-      'SELECT id FROM branches WHERE name = ?',
+    const existingBranchesResult = await pool.query(
+      'SELECT id FROM branches WHERE name = $1',
       [name]
     )
 
+    const existingBranches = existingBranchesResult.rows
     if (existingBranches.length > 0) {
       return NextResponse.json(
         { success: false, message: 'Branch name already exists' },
@@ -118,66 +125,50 @@ export async function POST(request) {
       )
     }
 
-    // Start transaction
-    const connection = await pool.getConnection()
-    await connection.beginTransaction()
+    // Insert new branch with rates
+    const branchResult = await pool.query(`
+      INSERT INTO branches (name, address, description, monthly_rent, water_rate, electricity_rate)
+      VALUES ($1, $2, $3, $4, $5, $6) RETURNING id
+    `, [name, address, '', parseFloat(monthly_rent), parseFloat(water_rate), parseFloat(electricity_rate)])
 
-    try {
-      // Insert new branch
-      const [branchResult] = await connection.execute(`
-        INSERT INTO branches (name, address, monthly_rent, water_rate, electricity_rate)
-        VALUES (?, ?, ?, ?, ?)
-      `, [name, address, parseFloat(monthly_rent), parseFloat(water_rate), parseFloat(electricity_rate)])
+    const branchId = branchResult.rows[0].id
 
-      const branchId = branchResult.insertId
-
-      // Create rooms automatically
-      const roomInserts = []
-      for (let i = 1; i <= parseInt(room_count); i++) {
-        const roomNumber = room_prefix ? `${room_prefix}${i.toString().padStart(2, '0')}` : i.toString()
-        roomInserts.push([roomNumber, parseFloat(monthly_rent), branchId, 'vacant'])
-      }
-
-      // Batch insert rooms
-      await connection.execute(`
+    // Create rooms automatically
+    for (let i = 1; i <= parseInt(room_count); i++) {
+      const roomNumber = room_prefix ? `${room_prefix}${i.toString().padStart(2, '0')}` : i.toString()
+      await pool.query(`
         INSERT INTO rooms (room_number, monthly_rent, branch_id, status)
-        VALUES ${roomInserts.map(() => '(?, ?, ?, ?)').join(', ')}
-      `, roomInserts.flat())
-
-      // Commit transaction
-      await connection.commit()
-
-      // Get the newly created branch with room count
-      const [newBranch] = await pool.execute(`
-        SELECT b.*, 
-               COUNT(r.id) as total_rooms,
-               COUNT(CASE WHEN r.status = 'occupied' THEN 1 END) as occupied_rooms,
-               COUNT(CASE WHEN r.status = 'vacant' THEN 1 END) as vacant_rooms
-        FROM branches b
-        LEFT JOIN rooms r ON b.id = r.branch_id
-        WHERE b.id = ?
-        GROUP BY b.id
-      `, [branchId])
-
-      return NextResponse.json({
-        success: true,
-        message: `Branch created successfully with ${room_count} rooms`,
-        branch: {
-          ...newBranch[0],
-          total_rooms: parseInt(newBranch[0].total_rooms) || 0,
-          occupied_rooms: parseInt(newBranch[0].occupied_rooms) || 0,
-          vacant_rooms: parseInt(newBranch[0].vacant_rooms) || 0,
-          occupancy_rate: 0
-        }
-      })
-
-    } catch (error) {
-      // Rollback transaction on error
-      await connection.rollback()
-      throw error
-    } finally {
-      connection.release()
+        VALUES ($1, $2, $3, $4)
+      `, [roomNumber, parseFloat(monthly_rent), branchId, 'vacant'])
     }
+
+    // Get the newly created branch with room count and rates
+    const newBranchResult = await pool.query(`
+      SELECT b.id, b.name, b.address, b.description,
+             b.monthly_rent, b.water_rate, b.electricity_rate,
+             b.created_at, b.updated_at,
+             COUNT(r.id) as total_rooms,
+             COUNT(CASE WHEN r.status = 'occupied' THEN 1 END) as occupied_rooms,
+             COUNT(CASE WHEN r.status = 'vacant' THEN 1 END) as vacant_rooms
+      FROM branches b
+      LEFT JOIN rooms r ON b.id = r.branch_id
+      WHERE b.id = $1
+      GROUP BY b.id, b.name, b.address, b.description, b.monthly_rent, b.water_rate, b.electricity_rate, b.created_at, b.updated_at
+    `, [branchId])
+
+    const newBranch = newBranchResult.rows
+
+    return NextResponse.json({
+      success: true,
+      message: `Branch created successfully with ${room_count} rooms`,
+      branch: {
+        ...newBranch[0],
+        total_rooms: parseInt(newBranch[0].total_rooms) || 0,
+        occupied_rooms: parseInt(newBranch[0].occupied_rooms) || 0,
+        vacant_rooms: parseInt(newBranch[0].vacant_rooms) || 0,
+        occupancy_rate: 0
+      }
+    })
 
   } catch (error) {
     console.error('Create branch error:', error)
@@ -210,11 +201,12 @@ export async function PUT(request) {
     }
 
     // Check if branch exists
-    const [existing] = await pool.execute(
-      'SELECT id FROM branches WHERE id = ?',
+    const existingResult = await pool.query(
+      'SELECT id FROM branches WHERE id = $1',
       [id]
     )
 
+    const existing = existingResult.rows
     if (existing.length === 0) {
       return NextResponse.json(
         { success: false, message: 'Branch not found' },
@@ -223,11 +215,12 @@ export async function PUT(request) {
     }
 
     // Check if new branch name conflicts with other branches
-    const [nameConflict] = await pool.execute(
-      'SELECT id FROM branches WHERE name = ? AND id != ?',
+    const nameConflictResult = await pool.query(
+      'SELECT id FROM branches WHERE name = $1 AND id != $2',
       [name, id]
     )
 
+    const nameConflict = nameConflictResult.rows
     if (nameConflict.length > 0) {
       return NextResponse.json(
         { success: false, message: 'Branch name already exists' },
@@ -236,10 +229,10 @@ export async function PUT(request) {
     }
 
     // Update branch
-    await pool.execute(`
+    await pool.query(`
       UPDATE branches 
-      SET name = ?, address = ?, description = ?
-      WHERE id = ?
+      SET name = $1, address = $2, description = $3
+      WHERE id = $4
     `, [name, address, description || null, id])
 
     return NextResponse.json({
@@ -284,11 +277,12 @@ export async function DELETE(request) {
     }
 
     // Check if branch has rooms
-    const [rooms] = await pool.execute(
-      'SELECT COUNT(*) as room_count FROM rooms WHERE branch_id = ?',
+    const roomsResult = await pool.query(
+      'SELECT COUNT(*) as room_count FROM rooms WHERE branch_id = $1',
       [id]
     )
 
+    const rooms = roomsResult.rows
     if (rooms[0].room_count > 0) {
       return NextResponse.json(
         { success: false, message: 'Cannot delete branch with existing rooms' },
@@ -297,12 +291,12 @@ export async function DELETE(request) {
     }
 
     // Delete branch
-    const [result] = await pool.execute(
-      'DELETE FROM branches WHERE id = ?',
+    const deleteResult = await pool.query(
+      'DELETE FROM branches WHERE id = $1',
       [id]
     )
 
-    if (result.affectedRows === 0) {
+    if (deleteResult.rowCount === 0) {
       return NextResponse.json(
         { success: false, message: 'Branch not found' },
         { status: 404 }

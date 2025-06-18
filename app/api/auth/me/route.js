@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server'
 import { requireAuth } from '../../../../lib/auth'
 
-const User = require('../../../../models/user')
+import User from '../../../../models/user.js'
 
 export async function GET(request) {
   try {

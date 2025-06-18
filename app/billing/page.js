@@ -52,6 +52,8 @@ export default function BillingPage() {
     notes: ''
   })
   const [currentElectricRate, setCurrentElectricRate] = useState(12.00) // Will be fetched from settings
+  const [tenantDeposits, setTenantDeposits] = useState(null)
+  const [penaltyPercentage, setPenaltyPercentage] = useState(1.00) // Will be fetched from settings
 
   useEffect(() => {
     fetchData()
@@ -71,7 +73,9 @@ export default function BillingPage() {
         const ratesData = await ratesResponse.json()
         if (ratesData.success) {
           setCurrentElectricRate(ratesData.rates.electric_rate_per_kwh)
+          setPenaltyPercentage(ratesData.rates.penalty_fee_percentage || 1.00)
           console.log('Current electric rate loaded:', ratesData.rates.electric_rate_per_kwh)
+          console.log('Penalty percentage loaded:', ratesData.rates.penalty_fee_percentage)
         }
       }
 
@@ -164,55 +168,13 @@ export default function BillingPage() {
     
     console.log('Processed dates from API - From:', rentFrom, 'To:', rentTo)
     
-    // Only use fallback if API data is completely missing or invalid
-    if (!rentFrom || !rentTo || rentFrom === 'Invalid Date' || rentTo === 'Invalid Date') {
-      console.warn('API billing period data missing or invalid, using fallback calculation')
-      
-      // Fallback: Try to calculate based on tenant's rent_start if available
-      if (room.rent_start) {
-        const rentStartDate = new Date(room.rent_start)
-        const rentStartDay = rentStartDate.getDate()
-        
-        // Calculate current billing period based on tenant's rent start day
-        const now = new Date()
-        const currentYear = now.getFullYear()
-        const currentMonth = now.getMonth()
-        
-        // Start from the tenant's billing day in current month
-        let periodStart = new Date(currentYear, currentMonth, rentStartDay)
-        
-        // If we're past the billing day, move to next month
-        if (now.getDate() > rentStartDay) {
-          periodStart = new Date(currentYear, currentMonth + 1, rentStartDay)
-        }
-        
-        // End date is one day before next month's billing day
-        const periodEnd = new Date(periodStart.getFullYear(), periodStart.getMonth() + 1, rentStartDay - 1)
-        
-        rentFrom = periodStart.toISOString().split('T')[0]
-        rentTo = periodEnd.toISOString().split('T')[0]
-        
-        console.log('Calculated fallback dates based on rent_start - From:', rentFrom, 'To:', rentTo)
-      } else {
-        // Last resort: use current month (1st to last day)
-        const now = new Date()
-        const currentMonth = now.getMonth()
-        const currentYear = now.getFullYear()
-        
-        rentFrom = new Date(currentYear, currentMonth, 1).toISOString().split('T')[0]
-        rentTo = new Date(currentYear, currentMonth + 1, 0).toISOString().split('T')[0]
-        
-        console.warn('Using last resort fallback dates (current month) - From:', rentFrom, 'To:', rentTo)
-      }
-    }
-    
     const formData = {
       tenant_id: room.tenant_id,
       room_id: room.room_id,
       rent_from: rentFrom,
       rent_to: rentTo,
       rent_amount: room.monthly_rent,
-      electric_previous_reading: room.previous_reading || 0,
+      electric_previous_reading: room.previous_reading, // Don't convert to number yet
       electric_present_reading: '',
       electric_consumption: 0,
       electric_amount: 0,
@@ -230,18 +192,19 @@ export default function BillingPage() {
   }
 
   const calculateElectricAmount = (presentReading) => {
-    const present = parseFloat(presentReading) || 0
+    // Keep both readings exactly as they are
     const previous = parseFloat(billFormData.electric_previous_reading) || 0
+    const present = parseFloat(presentReading) || 0
     const consumption = Math.max(0, present - previous)
     const rate = currentElectricRate
-    const amount = consumption * rate
+    const amount = parseFloat((consumption * rate).toFixed(2))
     
     setBillFormData(prev => ({
       ...prev,
-      electric_present_reading: presentReading,
+      electric_present_reading: presentReading, // Keep as string for input
       electric_consumption: consumption,
       electric_amount: amount,
-      total_amount: parseFloat(prev.rent_amount) + amount + parseFloat(prev.water_amount) + parseFloat(prev.extra_fee_amount || 0)
+      total_amount: parseFloat((parseFloat(prev.rent_amount) + amount + parseFloat(prev.water_amount) + parseFloat(prev.extra_fee_amount || 0)).toFixed(2))
     }))
   }
 
@@ -249,12 +212,31 @@ export default function BillingPage() {
     e.preventDefault()
     
     if (!billFormData.electric_present_reading) {
-      toast.error('Please enter the present electricity reading')
+                toast.error('Enter electricity reading')
       return
     }
 
     setLoading(true)
     try {
+      // First check if a bill already exists for this period
+      const checkResponse = await fetch(`/api/bills/check-existing?tenant_id=${billFormData.tenant_id}&rent_from=${billFormData.rent_from}&rent_to=${billFormData.rent_to}`, {
+        headers: {
+          'Authorization': `Bearer ${localStorage.getItem('token')}`
+        }
+      })
+
+      const checkData = await checkResponse.json()
+      
+      if (checkData.exists) {
+                    toast.error('Bill already exists')
+        return
+      }
+
+      // Set due date to the last day of the billing cycle (rent_to date)
+      const rentToDate = new Date(billFormData.rent_to)
+      const dueDate = new Date(rentToDate.getTime())
+      
+      // If no existing bill, create the new bill
       const response = await fetch('/api/bills', {
         method: 'POST',
         headers: {
@@ -264,6 +246,7 @@ export default function BillingPage() {
         body: JSON.stringify({
           ...billFormData,
           bill_date: new Date().toISOString().split('T')[0],
+          due_date: dueDate.toISOString().split('T')[0],
           status: 'unpaid',
           prepared_by: 'Admin'
         })
@@ -272,10 +255,54 @@ export default function BillingPage() {
       const data = await response.json()
       
       if (data.success) {
-        toast.success('Bill created and sent to tenant successfully!')
+        toast.success('Bill created successfully')
         setShowBillModal(false)
         resetBillForm()
         fetchData()
+      } else if (data.error_type === 'unpaid_bills_exist') {
+        // Handle unpaid bills validation error with admin override option
+        const unpaidBillsList = data.unpaid_bills.map(bill => 
+          `₱${bill.amount} (${bill.period}, ${bill.status})`
+        ).join('\n')
+        
+        const overrideConfirm = window.confirm(
+          `⚠️ UNPAID BILLS DETECTED ⚠️\n\n` +
+          `Tenant has ${data.unpaid_bills.length} unpaid bill(s):\n${unpaidBillsList}\n\n` +
+          `Total unpaid: ₱${data.total_unpaid.toFixed(2)}\n\n` +
+          `🛡️ ADMIN OVERRIDE: Generate bill anyway?\n\n` +
+          `⚠️ Warning: This will create a new bill while previous bills remain unpaid. ` +
+          `Make sure this is intentional (e.g., for billing corrections or special circumstances).`
+        )
+        
+        if (overrideConfirm) {
+          // Retry with admin override flag
+          const overrideResponse = await fetch('/api/bills', {
+            method: 'POST',
+            headers: {
+              'Authorization': `Bearer ${localStorage.getItem('token')}`,
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+              ...billFormData,
+              bill_date: new Date().toISOString().split('T')[0],
+              due_date: dueDate.toISOString().split('T')[0],
+              status: 'unpaid',
+              prepared_by: 'Admin',
+              admin_override: true // Add override flag
+            })
+          })
+
+          const overrideData = await overrideResponse.json()
+          
+          if (overrideData.success) {
+            toast.success('Bill created with override')
+            setShowBillModal(false)
+            resetBillForm()
+            fetchData()
+          } else {
+            toast.error(overrideData.message || 'Failed to create bill with override')
+          }
+        }
       } else {
         toast.error(data.message || 'Failed to create bill')
       }
@@ -287,16 +314,18 @@ export default function BillingPage() {
     }
   }
 
-  // Payment functions
-  const openPaymentModal = (bill) => {
+  // Update openPaymentModal to not fetch deposits
+  const openPaymentModal = async (bill) => {
+    console.log('Opening payment modal for bill:', bill)
     setSelectedBill(bill)
     setPaymentFormData({
       payment_amount: bill.status === 'partial' ? bill.remaining_balance : bill.total_amount,
       payment_method: 'regular',
       payment_type: 'cash',
-      actual_payment_date: new Date().toISOString().split('T')[0], // Default to today
+      actual_payment_date: new Date().toISOString().split('T')[0],
       notes: ''
     })
+    
     setShowPaymentModal(true)
   }
 
@@ -317,7 +346,7 @@ export default function BillingPage() {
     }
   }, [selectedBill, paymentFormData.actual_payment_date])
 
-  // Filter active bills (unpaid and partial) bills
+  // Filter active bills (unpaid, partial, and refund) bills - exclude paid bills
   const activeBills = bills.filter(bill => bill.status !== 'paid')
 
   // Filter rooms and bills by branch
@@ -329,27 +358,23 @@ export default function BillingPage() {
     ? activeBills.filter(bill => bill.branch_name === branchFilter)
     : activeBills
 
-  // Filter ALL bills by branch (for comprehensive view)
-  const filteredAllBills = branchFilter
-    ? bills.filter(bill => bill.branch_name === branchFilter)
-    : bills
-
   // Debug logging for filtering
   if (branchFilter) {
     console.log('Branch filter applied:', branchFilter)
     console.log('Total rooms:', rooms.length)
     console.log('Filtered rooms:', filteredRooms.length)
     console.log('Sample room branch names:', rooms.slice(0, 3).map(r => ({ room: r.room_number, branch: r.branch_name })))
-    console.log('Total bills:', bills.length)
-    console.log('Filtered bills:', filteredAllBills.length)
+    console.log('Total active bills:', activeBills.length)
+    console.log('Filtered active bills:', filteredActiveBills.length)
   }
 
-  // Sort bills: unpaid first, then partial, then paid
-  const sortedFilteredBills = filteredAllBills.sort((a, b) => {
-    const statusOrder = { 'unpaid': 0, 'overdue': 1, 'partial': 2, 'paid': 3 }
+  // Sort bills: refund first, then unpaid, then overdue, then partial
+  const sortedFilteredBills = filteredActiveBills.sort((a, b) => {
+    const statusOrder = { 'refund': -1, 'unpaid': 0, 'overdue': 1, 'partial': 2 }
     return statusOrder[a.status] - statusOrder[b.status]
   })
 
+  // Simplify payment form submission
   const handlePaymentSubmit = async (e) => {
     e.preventDefault()
     setLoading(true)
@@ -364,7 +389,7 @@ export default function BillingPage() {
         body: JSON.stringify({
           bill_id: selectedBill.id,
           payment_amount: parseFloat(paymentFormData.payment_amount),
-          payment_method: paymentFormData.payment_method,
+          payment_method: 'regular',
           payment_type: paymentFormData.payment_type,
           actual_payment_date: paymentFormData.actual_payment_date,
           notes: paymentFormData.notes
@@ -373,20 +398,44 @@ export default function BillingPage() {
 
       const data = await response.json()
 
-      if (data.success) {
-        // Show success message with receipt status
-        let message = 'Payment processed successfully!'
-        if (data.receipt) {
-          if (data.receipt.email_sent) {
-            message += ` Receipt sent to ${data.receipt.recipient}.`
-          } else if (data.receipt.recipient) {
-            message += ` Note: Receipt email failed to send to ${data.receipt.recipient}.`
-          } else {
-            message += ' Note: No email address on file for receipt.'
-          }
-        }
+      // Check if this is a refund bill that needs to be redirected
+      if (!data.success && data.redirect_to_refund) {
+        console.log('Refund bill detected, redirecting to complete-refund endpoint...')
         
-        toast.success(message)
+        // Use the complete-refund endpoint instead
+        const refundResponse = await fetch('/api/bills/complete-refund', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${localStorage.getItem('token')}`
+          },
+          body: JSON.stringify({ bill_id: data.bill_id })
+        })
+
+        const refundData = await refundResponse.json()
+
+        if (refundData.success) {
+          toast.success('Refund completed successfully')
+          
+          setShowPaymentModal(false)
+          setPaymentFormData({
+            payment_amount: '',
+            payment_method: 'regular',
+            payment_type: 'cash',
+            actual_payment_date: new Date().toISOString().split('T')[0],
+            notes: ''
+          })
+          fetchData() // Refresh data
+          return
+        } else {
+          toast.error('Error: ' + refundData.message)
+          return
+        }
+      }
+
+      if (data.success) {
+        toast.success('Payment processed successfully')
+        
         setShowPaymentModal(false)
         setPaymentFormData({
           payment_amount: '',
@@ -401,7 +450,7 @@ export default function BillingPage() {
       }
     } catch (error) {
       console.error('Payment error:', error)
-      toast.error('Error processing payment. Please try again.')
+      toast.error('Payment failed')
     } finally {
       setLoading(false)
     }
@@ -422,13 +471,45 @@ export default function BillingPage() {
       const data = await response.json()
 
       if (data.success) {
-        toast.success('Receipt sent successfully!')
+        toast.success('Receipt sent')
       } else {
         toast.error('Error: ' + data.message)
       }
     } catch (error) {
       console.error('Send receipt error:', error)
-      toast.error('Error sending receipt. Please try again.')
+      toast.error('Receipt failed')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const completeRefund = async (bill) => {
+    if (!confirm(`Complete refund of ${formatCurrency(Math.abs(bill.total_amount))} for ${bill.tenant_name}?`)) {
+      return
+    }
+
+    try {
+      setLoading(true)
+      const response = await fetch('/api/bills/complete-refund', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${localStorage.getItem('token')}`
+        },
+        body: JSON.stringify({ bill_id: bill.id })
+      })
+
+      const data = await response.json()
+
+      if (data.success) {
+        toast.success('Refund completed')
+        fetchData() // Refresh data
+      } else {
+        toast.error('Error: ' + data.message)
+      }
+    } catch (error) {
+      console.error('Complete refund error:', error)
+      toast.error('Refund failed')
     } finally {
       setLoading(false)
     }
@@ -453,14 +534,23 @@ export default function BillingPage() {
     const paymentDate = new Date(actualPaymentDate)
     paymentDate.setHours(0, 0, 0, 0)
     
-    const billDate = new Date(bill.bill_date)
-    billDate.setHours(0, 0, 0, 0)
+    // Calculate proper due date based on billing cycle
+    // Due date should be 10 days after the end of the billing period (rent_to)
+    const rentToDate = new Date(bill.rent_to)
+    rentToDate.setHours(0, 0, 0, 0)
     
-    const dueDate = new Date(bill.due_date || billDate.getTime() + (10 * 24 * 60 * 60 * 1000))
+    const dueDate = new Date(rentToDate.getTime() + (10 * 24 * 60 * 60 * 1000)) // 10 days after rent period ends
     dueDate.setHours(0, 0, 0, 0)
     
-    if (paymentDate > dueDate) {
-      return parseFloat(bill.total_amount) * 0.01 // 1% penalty
+    // Always use calculated due date based on billing cycle, ignore database due_date
+    // This ensures penalty is always calculated correctly based on rent cycle
+    const finalDueDate = dueDate
+    finalDueDate.setHours(0, 0, 0, 0)
+    
+    if (paymentDate > finalDueDate) {
+      // Use configurable penalty percentage and round to whole number
+      const penaltyAmount = parseFloat(bill.total_amount) * (penaltyPercentage / 100)
+      return Math.round(penaltyAmount)
     }
     
     return 0
@@ -478,6 +568,8 @@ export default function BillingPage() {
             {daysUntilDue <= 0 ? 'Overdue' : daysUntilDue <= 3 ? 'Due Soon' : 'Needs Bill'}
           </span>
         )
+      case 'has_unpaid_bills':
+        return <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-red-100 text-red-800">⚠️ Unpaid Bills</span>
       case 'already_billed':
         return <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-yellow-100 text-yellow-800">Billed</span>
       case 'no_tenant':
@@ -499,7 +591,7 @@ export default function BillingPage() {
 
   return (
     <>
-      <Toaster position="top-right" />
+              <Toaster position="top-center" />
       <DashboardLayout>
         <div className="px-4 sm:px-6 lg:px-8 pb-6">
           {/* Header */}
@@ -610,6 +702,15 @@ export default function BillingPage() {
                           <BoltIcon className="h-4 w-4 mr-1" />
                           Generate Bill
                         </button>
+                      ) : room.billing_status === 'has_unpaid_bills' ? (
+                        <button
+                          onClick={() => openGenerateBillModal(room)}
+                          className="w-full inline-flex justify-center items-center px-3 py-2 border border-transparent text-sm leading-4 font-medium rounded-md text-white bg-orange-600 hover:bg-orange-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-orange-500"
+                          title="Generate bill with admin override (tenant has unpaid bills)"
+                        >
+                          <BoltIcon className="h-4 w-4 mr-1" />
+                          Generate (Override)
+                        </button>
                       ) : room.billing_status === 'already_billed' ? (
                         <button
                           disabled
@@ -639,11 +740,11 @@ export default function BillingPage() {
             </div>
           </div>
 
-          {/* Bills List */}
+          {/* Active Bills List */}
           <div className="bg-white shadow overflow-hidden sm:rounded-md">
             <div className="px-4 py-5 sm:p-6">
               <h3 className="text-lg leading-6 font-medium text-gray-900 mb-4">
-                All Bills
+                Active Bills (Unpaid, Partial & Refunds)
                 {branchFilter && (
                   <span className="text-sm font-normal text-gray-600 ml-2">
                     - {branchFilter} ({sortedFilteredBills.length} bills)
@@ -653,17 +754,17 @@ export default function BillingPage() {
               
               {branchFilter && sortedFilteredBills.length > 0 && (
                 <div className="mb-4 flex flex-wrap gap-2 text-xs">
-                  {['unpaid', 'overdue', 'partial', 'paid'].map(status => {
+                  {['refund', 'unpaid', 'overdue', 'partial'].map(status => {
                     const count = sortedFilteredBills.filter(bill => bill.status === status).length
                     if (count === 0) return null
                     return (
                       <span key={status} className={`inline-flex items-center px-2 py-1 rounded-full font-medium ${
-                        status === 'paid' ? 'bg-green-100 text-green-800' :
+                        status === 'refund' ? 'bg-blue-100 text-blue-800' :
                         status === 'partial' ? 'bg-yellow-100 text-yellow-800' :
                         status === 'overdue' ? 'bg-red-100 text-red-800' :
                         'bg-gray-100 text-gray-800'
                       }`}>
-                        {count} {status}
+                        {count} {status === 'refund' ? 'refunds' : status}
                       </span>
                     )
                   })}
@@ -687,17 +788,24 @@ export default function BillingPage() {
                               <span className="ml-2 text-xs text-gray-500">
                                 ({bill.branch_name})
                               </span>
-                              <span className={`ml-2 inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${
-                                bill.status === 'paid' 
-                                  ? 'bg-green-100 text-green-800'
-                                  : bill.status === 'partial'
-                                  ? 'bg-yellow-100 text-yellow-800'
-                                  : bill.status === 'overdue'
-                                  ? 'bg-red-100 text-red-800'
-                                  : 'bg-gray-100 text-gray-800'
-                              }`}>
-                                {bill.status.charAt(0).toUpperCase() + bill.status.slice(1)}
-                              </span>
+                                            <span className={`ml-2 inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${
+                bill.status === 'paid' 
+                  ? 'bg-green-100 text-green-800'
+                  : bill.status === 'partial'
+                  ? 'bg-yellow-100 text-yellow-800'
+                  : bill.status === 'overdue'
+                  ? 'bg-red-100 text-red-800'
+                  : bill.status === 'refund'
+                  ? 'bg-blue-100 text-blue-800'
+                  : 'bg-gray-100 text-gray-800'
+              }`}>
+                {bill.status === 'refund' ? '💰 Refund' : bill.status.charAt(0).toUpperCase() + bill.status.slice(1)}
+              </span>
+                              {bill.is_final_bill && (
+                                <span className="ml-2 inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-purple-100 text-purple-800">
+                                  🏠 Final Bill
+                                </span>
+                              )}
                             </div>
                             <div className="mt-2 flex items-center text-sm text-gray-500">
                               <CalendarIcon className="flex-shrink-0 mr-1.5 h-4 w-4" />
@@ -710,7 +818,9 @@ export default function BillingPage() {
                         <div className="flex items-center space-x-4">
                           <div className="text-right">
                             <p className="text-lg font-medium text-gray-900">
-                              {bill.status === 'partial' ? (
+                              {bill.status === 'refund' ? (
+                                <span className="text-blue-600">{formatCurrency(Math.abs(bill.total_amount))} Refund</span>
+                              ) : bill.status === 'partial' ? (
                                 <>
                                   <span className="text-red-600">{formatCurrency(bill.remaining_balance)}</span>
                                   <span className="text-sm text-gray-500 block">
@@ -722,10 +832,24 @@ export default function BillingPage() {
                               )}
                             </p>
                             <p className="text-sm text-gray-500">
-                              Bill Date: {formatDate(bill.bill_date)}
+                              {bill.status === 'refund' ? 'Refund Date:' : 'Bill Date:'} {formatDate(bill.bill_date)}
+                              {bill.actual_payment_date && (
+                                <span className="ml-2 text-green-600">
+                                  (Paid: {formatDate(bill.actual_payment_date)})
+                                </span>
+                              )}
                             </p>
                           </div>
                           <div className="flex space-x-2">
+                            {bill.status === 'refund' && (
+                              <button 
+                                onClick={() => completeRefund(bill)}
+                                className="px-3 py-1 bg-green-600 text-white text-xs rounded hover:bg-green-700"
+                                title="Complete Refund"
+                              >
+                                Complete Refund
+                              </button>
+                            )}
                             {(bill.status === 'unpaid' || bill.status === 'partial') && (
                               <button 
                                 onClick={() => openPaymentModal(bill)}
@@ -739,25 +863,37 @@ export default function BillingPage() {
                         </div>
                       </div>
                       
-                      {/* Bill breakdown */}
-                      <div className="mt-4 grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
-                        <div>
-                          <span className="text-gray-500">Rent:</span>
-                          <span className="ml-2 font-medium">{formatCurrency(bill.rent_amount)}</span>
+                      {/* Bill breakdown - only show for non-refund bills */}
+                      {bill.status !== 'refund' && (
+                        <div className="mt-4 grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
+                          <div>
+                            <span className="text-gray-500">Rent:</span>
+                            <span className="ml-2 font-medium">{formatCurrency(bill.rent_amount)}</span>
+                          </div>
+                          <div>
+                            <span className="text-gray-500">Electric:</span>
+                            <span className="ml-2 font-medium">{formatCurrency(bill.electric_amount)}</span>
+                          </div>
+                          <div>
+                            <span className="text-gray-500">Water:</span>
+                            <span className="ml-2 font-medium">{formatCurrency(bill.water_amount)}</span>
+                          </div>
+                          <div>
+                            <span className="text-gray-500">Extra:</span>
+                            <span className="ml-2 font-medium">{formatCurrency(bill.extra_fee_amount || 0)}</span>
+                          </div>
                         </div>
-                        <div>
-                          <span className="text-gray-500">Electric:</span>
-                          <span className="ml-2 font-medium">{formatCurrency(bill.electric_amount)}</span>
+                      )}
+                      
+                      {/* Refund bill details */}
+                      {bill.status === 'refund' && bill.refund_reason && (
+                        <div className="mt-4 p-3 bg-blue-50 border border-blue-200 rounded-md">
+                          <div className="text-sm">
+                            <span className="text-blue-700 font-medium">Refund Reason:</span>
+                            <span className="ml-2 text-blue-600">{bill.refund_reason}</span>
+                          </div>
                         </div>
-                        <div>
-                          <span className="text-gray-500">Water:</span>
-                          <span className="ml-2 font-medium">{formatCurrency(bill.water_amount)}</span>
-                        </div>
-                        <div>
-                          <span className="text-gray-500">Extra:</span>
-                          <span className="ml-2 font-medium">{formatCurrency(bill.extra_fee_amount || 0)}</span>
-                        </div>
-                      </div>
+                      )}
                       
                       {/* Payment information for partial payments */}
                       {bill.status === 'partial' && (
@@ -854,8 +990,7 @@ export default function BillingPage() {
                     <div>
                       <label className="block text-sm font-medium text-gray-700">Present Reading *</label>
                       <input
-                        type="number"
-                        step="0.01"
+                        type="text"
                         value={billFormData.electric_present_reading}
                         onChange={(e) => calculateElectricAmount(e.target.value)}
                         required
@@ -918,10 +1053,11 @@ export default function BillingPage() {
                         step="0.01"
                         value={billFormData.extra_fee_amount}
                         onChange={(e) => {
+                          const value = e.target.value
                           setBillFormData(prev => ({
                             ...prev, 
-                            extra_fee_amount: e.target.value,
-                            total_amount: parseFloat(prev.rent_amount) + parseFloat(prev.electric_amount) + parseFloat(prev.water_amount) + parseFloat(e.target.value || 0)
+                            extra_fee_amount: value,
+                            total_amount: parseFloat(prev.rent_amount) + parseFloat(prev.electric_amount) + parseFloat(prev.water_amount) + parseFloat(value || 0)
                           }))
                         }}
                         className="mt-1 block w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-blue-500 focus:border-blue-500"
@@ -1035,7 +1171,7 @@ export default function BillingPage() {
                     <div className="col-span-2">
                       <span className="text-red-600 font-medium">Penalty Fee Applied:</span>
                       <span className="ml-2 text-red-600 font-medium">{formatCurrency(selectedBill.penalty_fee_amount)}</span>
-                      <span className="ml-2 text-xs text-gray-500">(1% late payment fee)</span>
+                      <span className="ml-2 text-xs text-gray-500">({penaltyPercentage}% late payment fee)</span>
                     </div>
                   )}
                 </div>
@@ -1051,82 +1187,73 @@ export default function BillingPage() {
                     type="number"
                     step="0.01"
                     value={paymentFormData.payment_amount}
-                    onChange={(e) => setPaymentFormData(prev => ({...prev, payment_amount: e.target.value}))}
+                    onChange={(e) => {
+                      const inputAmount = parseFloat(e.target.value)
+                      const penaltyFee = calculatePenaltyFee(selectedBill, paymentFormData.actual_payment_date)
+                      const baseAmount = selectedBill.status === 'partial' ? selectedBill.remaining_balance : selectedBill.total_amount
+                      const maxAmount = parseFloat(baseAmount) + penaltyFee
+                      
+                      // Check if this is a refund bill (negative amounts)
+                      const isRefundBill = selectedBill.is_refund_bill || parseFloat(selectedBill.total_amount) < 0
+                      
+                      if (isRefundBill) {
+                        // For refund bills, validate absolute values
+                        const maxRefundAmount = Math.abs(maxAmount)
+                        const inputRefundAmount = Math.abs(inputAmount)
+                        
+                        if (inputRefundAmount > (maxRefundAmount + 0.01)) {
+                          toast.error('Refund amount exceeded')
+                          return
+                        }
+                      } else {
+                        // For regular bills, use original validation
+                        if (inputAmount > (maxAmount + 0.01)) {
+                          toast.error('Payment amount exceeded')
+                          return
+                        }
+                      }
+                      
+                      setPaymentFormData(prev => ({...prev, payment_amount: e.target.value}))
+                    }}
                     className="block w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-blue-500 focus:border-blue-500"
                     placeholder="Enter payment amount"
                     required
                   />
                   <p className="text-xs text-gray-500 mt-1">
-                    {selectedBill.status === 'partial' 
-                      ? `Remaining balance: ${formatCurrency(selectedBill.remaining_balance)} (editable for partial payments)`
-                      : `Full amount: ${formatCurrency(selectedBill.total_amount)} (editable for partial payments)`
-                    }
+                    {(() => {
+                      const penaltyFee = calculatePenaltyFee(selectedBill, paymentFormData.actual_payment_date)
+                      const baseAmount = selectedBill.status === 'partial' ? selectedBill.remaining_balance : selectedBill.total_amount
+                      const totalWithPenalty = parseFloat(baseAmount) + penaltyFee
+                      
+                      if (penaltyFee > 0) {
+                        return `Total with penalty: ${formatCurrency(totalWithPenalty)}`
+                      } else {
+                        return selectedBill.status === 'partial'
+                          ? `Remaining balance: ${formatCurrency(selectedBill.remaining_balance)}`
+                          : `Full amount: ${formatCurrency(selectedBill.total_amount)}`
+                      }
+                    })()}
                   </p>
                 </div>
 
-                {/* Payment Method */}
+                {/* Payment Type */}
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1">
-                    Payment Method *
+                    Payment Type *
                   </label>
                   <select
-                    value={paymentFormData.payment_method}
-                    onChange={(e) => {
-                      setPaymentFormData(prev => ({
-                        ...prev, 
-                        payment_method: e.target.value,
-                        payment_type: e.target.value === 'regular' ? 'cash' : 'advance'
-                      }))
-                    }}
+                    value={paymentFormData.payment_type}
+                    onChange={(e) => setPaymentFormData(prev => ({...prev, payment_type: e.target.value}))}
                     className="block w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-blue-500 focus:border-blue-500"
                     required
                   >
-                    <option value="regular">Regular Payment</option>
-                    <option value="deposit">Use Deposit</option>
+                    <option value="cash">Cash</option>
+                    <option value="gcash">GCash</option>
+                    <option value="bank">Bank Transfer</option>
+                    <option value="check">Check</option>
+                    <option value="other">Other</option>
                   </select>
                 </div>
-
-                {/* Payment Type */}
-                {paymentFormData.payment_method === 'regular' ? (
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">
-                      Payment Type *
-                    </label>
-                    <select
-                      value={paymentFormData.payment_type}
-                      onChange={(e) => setPaymentFormData(prev => ({...prev, payment_type: e.target.value}))}
-                      className="block w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-blue-500 focus:border-blue-500"
-                      required
-                    >
-                      <option value="cash">Cash</option>
-                      <option value="gcash">GCash</option>
-                      <option value="bank">Bank Transfer</option>
-                      <option value="check">Check</option>
-                      <option value="other">Other</option>
-                    </select>
-                  </div>
-                ) : (
-                  <div>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">
-                      Deposit Type *
-                    </label>
-                    <select
-                      value={paymentFormData.payment_type}
-                      onChange={(e) => setPaymentFormData(prev => ({...prev, payment_type: e.target.value}))}
-                      className="block w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-blue-500 focus:border-blue-500"
-                      required
-                    >
-                      <option value="advance">Advance Deposit (Rent Only)</option>
-                      <option value="security">Security Deposit (All Fees)</option>
-                    </select>
-                    <p className="text-xs text-gray-500 mt-1">
-                      {paymentFormData.payment_type === 'advance' 
-                        ? 'Advance deposit can only be used for monthly rent'
-                        : 'Security deposit can be used for rent, electricity, and other fees'
-                      }
-                    </p>
-                  </div>
-                )}
 
                 {/* Actual Payment Date */}
                 <div>
@@ -1141,7 +1268,7 @@ export default function BillingPage() {
                     required
                   />
                   <p className="text-xs text-gray-500 mt-1">
-                    Date when tenant actually made the payment. Late payments (more than 10 days after bill date) will incur a 1% penalty fee.
+                    Date when tenant actually made the payment. Late payments (more than 10 days after billing period ends) will incur a {penaltyPercentage}% penalty fee.
                   </p>
                 </div>
 
@@ -1158,7 +1285,7 @@ export default function BillingPage() {
                           <div>
                             <h4 className="text-sm font-medium text-red-800">Late Payment Penalty</h4>
                             <p className="text-sm text-red-700 mt-1">
-                              A 1% penalty fee of <strong>{formatCurrency(penaltyFee)}</strong> will be added to this bill for late payment.
+                              A {penaltyPercentage}% penalty fee of <strong>{formatCurrency(penaltyFee)}</strong> will be added to this bill for late payment.
                             </p>
                             <p className="text-xs text-red-600 mt-1">
                               New total: <strong>{formatCurrency(parseFloat(selectedBill.total_amount) + penaltyFee)}</strong>
@@ -1197,9 +1324,13 @@ export default function BillingPage() {
                   <button
                     type="submit"
                     disabled={loading}
-                    className="px-4 py-2 bg-blue-600 text-white text-sm font-medium rounded-md hover:bg-blue-700 disabled:opacity-50"
+                    className={`px-4 py-2 text-white text-sm font-medium rounded-md disabled:opacity-50 ${
+                      selectedBill.is_final_bill 
+                        ? 'bg-green-600 hover:bg-green-700' 
+                        : 'bg-blue-600 hover:bg-blue-700'
+                    }`}
                   >
-                    {loading ? 'Processing...' : 'Process Payment'}
+                    {loading ? 'Processing...' : selectedBill.is_final_bill ? 'Complete Final Payment' : 'Process Payment'}
                   </button>
                 </div>
               </form>

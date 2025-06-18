@@ -20,14 +20,15 @@ export async function POST(request) {
     const thirtyDaysFromNow = new Date()
     thirtyDaysFromNow.setDate(thirtyDaysFromNow.getDate() + 30)
 
-    const [expiringContracts] = await pool.execute(`
+    const expiringContractsResult = await pool.query(`
       SELECT t.*, r.room_number, b.name as branch_name
       FROM tenants t
       LEFT JOIN rooms r ON t.room_id = r.id
       LEFT JOIN branches b ON r.branch_id = b.id
-      WHERE t.contract_end_date <= ? 
+      WHERE t.contract_end_date <= $1
         AND t.contract_status = 'active'
         AND (t.contract_expiry_notified = FALSE OR t.contract_expiry_notified IS NULL)
+    const expiringContracts = expiringContractsResult.rows
     `, [thirtyDaysFromNow.toISOString().split('T')[0]])
 
     console.log(`📋 Found ${expiringContracts.length} expiring contracts`)
@@ -50,7 +51,7 @@ export async function POST(request) {
 
         if (daysUntilExpiry <= 0) {
           // Contract expired
-          await pool.execute(
+          await pool.query(
             'UPDATE tenants SET contract_status = ? WHERE id = ?',
             ['expired', tenant.id]
           )
@@ -85,10 +86,10 @@ export async function POST(request) {
             emailSent = true
             
             // Log email notification
-            await pool.execute(`
+            await pool.query(`
               INSERT INTO email_notifications 
               (tenant_id, email_type, email_subject, recipient_email, status) 
-              VALUES (?, ?, ?, ?, ?)
+              VALUES ($4, $5, $6, $7, $4) RETURNING id
             `, [
               tenant.id,
               `contract_expiry_${notificationType}`,
@@ -107,7 +108,7 @@ export async function POST(request) {
         }
 
         // Mark tenant as notified
-        await pool.execute(
+        await pool.query(
           'UPDATE tenants SET contract_expiry_notified = TRUE WHERE id = ?',
           [tenant.id]
         )

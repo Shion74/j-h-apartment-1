@@ -1,0 +1,660 @@
+import { NextResponse } from 'next/server'
+import { pool } from '../../../../lib/database'
+import { requireAuth } from '../../../../lib/auth'
+
+export async function GET(request, { params }) {
+  try {
+    // Check authentication
+    const authResult = requireAuth(request)
+    if (authResult.error) {
+      return NextResponse.json(
+        { success: false, message: authResult.error },
+        { status: authResult.status }
+      )
+    }
+
+    const { id } = params
+
+    // Get specific tenant with room and branch details
+    const [tenant] = await pool.execute(`
+      SELECT 
+        t.*,
+        r.room_number,
+        r.monthly_rent,
+        b.name as branch_name,
+        b.address as branch_address
+      FROM tenants t
+      LEFT JOIN rooms r ON t.room_id = r.id
+      LEFT JOIN branches b ON r.branch_id = b.id
+      WHERE t.id = ?
+    `, [id])
+
+    if (tenant.length === 0) {
+      return NextResponse.json(
+        { success: false, message: 'Tenant not found' },
+        { status: 404 }
+      )
+    }
+
+    return NextResponse.json({
+      success: true,
+      tenant: tenant[0]
+    })
+
+  } catch (error) {
+    console.error('Tenant fetch error:', error)
+    return NextResponse.json(
+      { success: false, message: 'Internal server error' },
+      { status: 500 }
+    )
+  }
+}
+
+export async function PUT(request, { params }) {
+  try {
+    // Check authentication
+    const authResult = requireAuth(request)
+    if (authResult.error) {
+      return NextResponse.json(
+        { success: false, message: authResult.error },
+        { status: authResult.status }
+      )
+    }
+
+    const { id } = params
+    const updateData = await request.json()
+
+    // Get current tenant data
+    const [currentTenant] = await pool.execute(
+      'SELECT * FROM tenants WHERE id = ?',
+      [id]
+    )
+
+    if (currentTenant.length === 0) {
+      return NextResponse.json(
+        { success: false, message: 'Tenant not found' },
+        { status: 404 }
+      )
+    }
+
+    const current = currentTenant[0]
+
+    // Build update query dynamically
+    const updateFields = []
+    const updateValues = []
+
+    const allowedFields = [
+      'name', 'mobile', 'email', 'address', 'room_id', 'rent_start',
+      'initial_electric_reading', 'advance_payment', 'security_deposit',
+      'advance_payment_status', 'security_deposit_status', 'contract_status'
+    ]
+
+    allowedFields.forEach(field => {
+      if (updateData[field] !== undefined) {
+        updateFields.push(`${field} = ?`)
+        updateValues.push(updateData[field])
+      }
+    })
+
+    if (updateFields.length === 0) {
+      return NextResponse.json(
+        { success: false, message: 'No valid fields to update' },
+        { status: 400 }
+      )
+    }
+
+    updateValues.push(id)
+
+    // Update tenant
+    await pool.execute(
+      `UPDATE tenants SET ${updateFields.join(', ')} WHERE id = ?`,
+      updateValues
+    )
+
+    // Handle room status changes
+    if (updateData.room_id !== undefined) {
+      // Free up old room if it exists
+      if (current.room_id) {
+        await pool.execute(
+          'UPDATE rooms SET status = ? WHERE id = ?',
+          ['vacant', current.room_id]
+        )
+      }
+
+      // Occupy new room if assigned
+      if (updateData.room_id) {
+        await pool.execute(
+          'UPDATE rooms SET status = ? WHERE id = ?',
+          ['occupied', updateData.room_id]
+        )
+      }
+    }
+
+    // Get updated tenant data
+    const [updatedTenant] = await pool.execute(`
+      SELECT 
+        t.*,
+        r.room_number,
+        r.monthly_rent,
+        b.name as branch_name,
+        b.address as branch_address
+      FROM tenants t
+      LEFT JOIN rooms r ON t.room_id = r.id
+      LEFT JOIN branches b ON r.branch_id = b.id
+      WHERE t.id = ?
+    `, [id])
+
+    return NextResponse.json({
+      success: true,
+      message: 'Tenant updated successfully',
+      tenant: updatedTenant[0]
+    })
+
+  } catch (error) {
+    console.error('Tenant update error:', error)
+    return NextResponse.json(
+      { success: false, message: 'Internal server error' },
+      { status: 500 }
+    )
+  }
+}
+
+export async function DELETE(request, { params }) {
+  try {
+    // Check authentication
+    const authResult = requireAuth(request)
+    if (authResult.error) {
+      return NextResponse.json(
+        { success: false, message: authResult.error },
+        { status: authResult.status }
+      )
+    }
+
+    const { id } = params
+    const body = await request.json().catch(() => ({}))
+        const {
+      reason_for_leaving = 'other',
+      notes: initialNotes = '',
+      final_electric_reading = 0,
+      force_delete = false,
+      use_advance_payment_for_last_month = false,
+      use_security_deposit_for_bills = false,
+      create_final_bill = false,
+      final_bill_data = null
+    } = body
+
+    let notes = initialNotes
+
+    // Get complete tenant data before deletion
+    const [tenant] = await pool.execute(`
+      SELECT 
+        t.*,
+        r.room_number,
+        r.monthly_rent,
+        b.name as branch_name,
+        b.address as branch_address
+      FROM tenants t
+      LEFT JOIN rooms r ON t.room_id = r.id
+      LEFT JOIN branches b ON r.branch_id = b.id
+      WHERE t.id = ?
+    `, [id])
+
+    if (tenant.length === 0) {
+      return NextResponse.json(
+        { success: false, message: 'Tenant not found' },
+        { status: 404 }
+      )
+    }
+
+    const tenantData = tenant[0]
+
+    // Check current month payment status
+    const [currentMonthPayment] = await pool.execute(`
+      SELECT 
+        CASE 
+          WHEN COUNT(*) > 0 THEN 'paid'
+          ELSE 'unpaid'
+        END as payment_status
+      FROM bills 
+      WHERE tenant_id = ? 
+        AND status = 'paid'
+        AND (
+          (rent_from <= DATE_FORMAT(CURDATE(), '%Y-%m-01') AND rent_to >= DATE_FORMAT(CURDATE(), '%Y-%m-01')) OR
+          (rent_from <= LAST_DAY(CURDATE()) AND rent_to >= LAST_DAY(CURDATE())) OR
+          (rent_from >= DATE_FORMAT(CURDATE(), '%Y-%m-01') AND rent_to <= LAST_DAY(CURDATE()))
+        )
+    `, [id])
+
+    // Get unpaid bills
+    const [unpaidBills] = await pool.execute(`
+      SELECT 
+        COUNT(*) as count,
+        COALESCE(SUM(total_amount), 0) as total_amount
+      FROM bills 
+      WHERE tenant_id = ? AND status = 'unpaid'
+    `, [id])
+
+    // Get paid bills total
+    const [paidBills] = await pool.execute(`
+      SELECT 
+        COUNT(*) as count,
+        COALESCE(SUM(total_amount), 0) as total_amount
+      FROM bills 
+      WHERE tenant_id = ? AND status = 'paid'
+    `, [id])
+
+    // Get last electric reading for billing info (same as regular billing)
+    const [lastBill] = await pool.execute(`
+      SELECT electric_present_reading 
+      FROM bills 
+      WHERE tenant_id = ? 
+      ORDER BY rent_to DESC 
+      LIMIT 1
+    `, [id])
+
+    const lastElectricReading = lastBill.length > 0 ? parseFloat(lastBill[0].electric_present_reading || 0) : 0
+
+    // Check if deletion is allowed
+    const currentMonthPaid = currentMonthPayment[0].payment_status === 'paid'
+    const hasUnpaidBills = unpaidBills[0].count > 0
+
+    if (!force_delete && (!currentMonthPaid || hasUnpaidBills)) {
+      const blockingReason = !currentMonthPaid 
+        ? 'Current month rent not paid' 
+        : `${unpaidBills[0].count} unpaid bills remaining`
+      
+      return NextResponse.json(
+        { 
+          success: false, 
+          message: `Cannot delete tenant: ${blockingReason}. Use force delete if necessary.`,
+          can_force_delete: true,
+          blocking_reason: blockingReason
+        },
+        { status: 400 }
+      )
+    }
+
+    // Calculate contract completion and deposit handling
+    const contractEndDate = new Date(tenantData.contract_end_date)
+    const currentDate = new Date()
+    const isContractCompleted = currentDate >= contractEndDate
+    const isEarlyTermination = currentDate < contractEndDate
+
+    const securityDepositAmount = parseFloat(tenantData.security_deposit || 0)
+    const securityUsedForBills = parseFloat(tenantData.security_used_for_bills || 0)
+    const advancePaymentAmount = parseFloat(tenantData.advance_payment || 0)
+    const advanceUsedForBills = parseFloat(tenantData.advance_used_for_bills || 0)
+    const unpaidAmount = parseFloat(unpaidBills[0].total_amount || 0)
+    
+    // Calculate advance payment handling based on business rules
+    let advancePaymentRefund = 0
+    let advancePaymentUsedLastMonth = 0
+    
+    // Note: Advance payment usage is handled in final bill creation section
+    // For early termination, any unused advance payment after daily rent will be refunded
+    
+    // Calculate security deposit handling based on business rules
+    let securityDepositRefund = 0
+    let securityDepositUsedForBills = 0
+    
+    if (isContractCompleted) {
+      // Business Rule: Contract completed = security deposit can be used for bills and remaining refunded
+      // Note: Actual usage will be calculated in final bill creation section
+      securityDepositRefund = 0 // Will be calculated after final bill processing
+    } else {
+      // Business Rule: Early termination = security deposit is kept by landlord
+      securityDepositRefund = 0
+    }
+
+    // Create final bill if requested
+    let finalBillId = null
+    if (create_final_bill && final_bill_data) {
+      try {
+        // Get the last electric reading from the most recent bill
+        const [lastBill] = await pool.execute(`
+          SELECT electric_present_reading 
+          FROM bills 
+          WHERE tenant_id = ? 
+          ORDER BY rent_to DESC 
+          LIMIT 1
+        `, [id])
+
+        const lastElectricReading = lastBill.length > 0 ? parseFloat(lastBill[0].electric_present_reading || 0) : 0
+        const currentElectricReading = parseFloat(final_bill_data.electric_present_reading || final_electric_reading)
+        const electricConsumption = Math.max(0, currentElectricReading - lastElectricReading)
+
+        // Use the same billing logic as regular bills
+        const Setting = require('../../../../models/setting')
+        const currentRates = await Setting.getBillingRates()
+        const finalElectricRate = currentRates.electric_rate_per_kwh
+        const finalWaterAmount = final_bill_data.water_amount || currentRates.water_fixed_amount
+
+        console.log('Using billing rates for final bill:', { 
+          finalElectricRate, 
+          finalWaterAmount, 
+          currentRatesFromDB: currentRates 
+        })
+
+        // Calculate prorated rent based on days in the period (same logic as regular bills)
+        const fromDate = new Date(final_bill_data.rent_from)
+        const toDate = new Date(final_bill_data.rent_to)
+        const daysDiff = Math.ceil((toDate - fromDate) / (1000 * 60 * 60 * 24)) + 1
+        const monthlyRent = parseFloat(tenantData.monthly_rent)
+        const proratedRentAmount = (monthlyRent / 30) * daysDiff
+
+        // Calculate electric amount (same as regular bills)
+        const electricAmount = electricConsumption * finalElectricRate
+
+        // Calculate total amount (same structure as regular bills)
+        const totalAmount = parseFloat(proratedRentAmount) + 
+                           parseFloat(electricAmount) + 
+                           parseFloat(finalWaterAmount) + 
+                           parseFloat(final_bill_data.extra_fee_amount || 0)
+
+        console.log('Final bill calculation:', {
+          proratedRentAmount,
+          electricConsumption,
+          finalElectricRate,
+          electricAmount,
+          finalWaterAmount,
+          extra_fee_amount: final_bill_data.extra_fee_amount || 0,
+          totalAmount,
+          daysPeriod: daysDiff
+        })
+
+        // Create final bill with same structure as regular bills
+        const [billResult] = await pool.execute(`
+          INSERT INTO bills (
+            tenant_id, room_id, bill_date, rent_from, rent_to, rent_amount,
+            electric_previous_reading, electric_present_reading, electric_consumption,
+            electric_rate_per_kwh, electric_amount, water_amount,
+            extra_fee_amount, extra_fee_description, total_amount, status
+          ) VALUES (?, ?, NOW(), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'unpaid')
+        `, [
+          tenantData.id, tenantData.room_id,
+          final_bill_data.rent_from, final_bill_data.rent_to, proratedRentAmount,
+          lastElectricReading, currentElectricReading, electricConsumption,
+          finalElectricRate, electricAmount, finalWaterAmount,
+          final_bill_data.extra_fee_amount || 0, final_bill_data.extra_fee_description || 'Final bill for move-out',
+          totalAmount
+        ])
+
+        finalBillId = billResult.insertId
+        console.log(`✅ Created final bill ${finalBillId} for tenant ${tenantData.name}`)
+
+        // Apply deposits to final bill based on business rules
+        // Separate prorated rent from other fees (electric, water, extras)
+        const otherFeesAmount = totalAmount - proratedRentAmount // electric + water + extras
+
+        console.log(`📊 Bill breakdown: Prorated rent: ₱${proratedRentAmount.toFixed(2)}, Other fees: ₱${otherFeesAmount.toFixed(2)}`)
+
+        // Step 1: Apply advance payment to prorated rent portion (always allowed)
+        const availableAdvancePayment = Math.max(0, advancePaymentAmount - advanceUsedForBills)
+        const advancePaymentToUse = Math.min(availableAdvancePayment, proratedRentAmount)
+        
+        if (advancePaymentToUse > 0) {
+          await pool.execute(`
+            INSERT INTO payments (bill_id, amount, payment_date, payment_method, notes) 
+            VALUES (?, ?, NOW(), 'advance_payment', 'Advance payment used for prorated rent')
+          `, [finalBillId, advancePaymentToUse])
+
+          await pool.execute(`
+            INSERT INTO deposit_transactions (
+              tenant_id, bill_id, transaction_type, amount, description, created_by
+            ) VALUES (?, ?, 'advance_used_last_month', ?, 'Advance payment used for prorated rent', 'system')
+          `, [tenantData.id, finalBillId, advancePaymentToUse])
+
+          advancePaymentUsedLastMonth = advancePaymentToUse
+        }
+
+        // Step 2: Apply security deposit for other fees (only if contract completed)
+        if (isContractCompleted && otherFeesAmount > 0) {
+          // Get remaining bill amount after advance payment
+          const [billBalance] = await pool.execute(`
+            SELECT (total_amount - COALESCE(SUM(p.amount), 0)) as remaining_balance
+            FROM bills b
+            LEFT JOIN payments p ON b.id = p.bill_id
+            WHERE b.id = ?
+            GROUP BY b.id
+          `, [finalBillId])
+
+          const remainingBalance = billBalance.length > 0 ? parseFloat(billBalance[0].remaining_balance) : (totalAmount - advancePaymentToUse)
+          const availableSecurityDeposit = Math.max(0, securityDepositAmount - securityUsedForBills)
+          const securityDepositToUse = Math.min(availableSecurityDeposit, remainingBalance)
+
+          if (securityDepositToUse > 0) {
+            await pool.execute(`
+              INSERT INTO payments (bill_id, amount, payment_date, payment_method, notes) 
+              VALUES (?, ?, NOW(), 'security_deposit', 'Security deposit used for other fees (electric, water, extras)')
+            `, [finalBillId, securityDepositToUse])
+
+            await pool.execute(`
+              INSERT INTO deposit_transactions (
+                tenant_id, bill_id, transaction_type, amount, description, created_by
+              ) VALUES (?, ?, 'security_used_bills', ?, 'Security deposit used for other fees', 'system')
+            `, [tenantData.id, finalBillId, securityDepositToUse])
+
+            securityDepositUsedForBills += securityDepositToUse
+          }
+
+          // Calculate final security deposit refund (remaining after bill payment)
+          const totalSecurityUsed = securityUsedForBills + securityDepositToUse
+          securityDepositRefund = Math.max(0, securityDepositAmount - totalSecurityUsed)
+        } else if (!isContractCompleted) {
+          // Early termination: security deposit cannot be used, will be kept
+          console.log(`⚠️ Early termination: Security deposit cannot be used for bills`)
+        }
+
+        // Calculate advance payment refund (remaining after daily rent usage)
+        const totalAdvanceUsed = advanceUsedForBills + advancePaymentUsedLastMonth
+        advancePaymentRefund = Math.max(0, advancePaymentAmount - totalAdvanceUsed)
+
+        // Check if final bill is now fully paid and update status
+        const [finalBillPayments] = await pool.execute(`
+          SELECT COALESCE(SUM(amount), 0) as total_paid 
+          FROM payments 
+          WHERE bill_id = ?
+        `, [finalBillId])
+
+        const totalPaid = parseFloat(finalBillPayments[0].total_paid)
+        if (totalPaid >= totalAmount) {
+          await pool.execute(`
+            UPDATE bills SET status = 'paid', paid_date = NOW() WHERE id = ?
+          `, [finalBillId])
+        } else if (totalPaid > 0) {
+          await pool.execute(`
+            UPDATE bills SET status = 'partial' WHERE id = ?
+          `, [finalBillId])
+        }
+
+      } catch (billError) {
+        console.error('Error creating final bill:', billError)
+        // Continue with move-out process even if bill creation fails
+        notes += ` | Final bill creation failed: ${billError.message}`
+      }
+    }
+
+    // Use connection for transaction
+    const connection = await pool.getConnection()
+
+    try {
+      await connection.beginTransaction()
+
+      // Record deposit transactions FIRST (while tenant still exists in active table)
+      if (advancePaymentRefund > 0) {
+        await connection.execute(`
+          INSERT INTO deposit_transactions (
+            tenant_id, transaction_type, amount, description, created_by
+          ) VALUES (?, 'advance_refund', ?, ?, 'system')
+        `, [
+          tenantData.id, 
+          advancePaymentRefund, 
+          `Advance payment refund on early termination`,
+          'admin'
+        ])
+      }
+
+      if (advancePaymentUsedLastMonth > 0) {
+        await connection.execute(`
+          INSERT INTO deposit_transactions (
+            tenant_id, transaction_type, amount, description, created_by
+          ) VALUES (?, 'advance_used_last_month', ?, ?, 'system')
+        `, [
+          tenantData.id, 
+          advancePaymentUsedLastMonth, 
+          `Advance payment used for last month rent`,
+          'admin'
+        ])
+      }
+
+      if (securityDepositRefund > 0) {
+        await connection.execute(`
+          INSERT INTO deposit_transactions (
+            tenant_id, transaction_type, amount, description, created_by
+          ) VALUES (?, 'security_refund', ?, ?, 'system')
+        `, [
+          tenantData.id, 
+          securityDepositRefund, 
+          `Security deposit refund on tenant departure - Contract ${isContractCompleted ? 'completed' : 'terminated early'}`,
+          'admin'
+        ])
+      }
+
+      if (securityDepositUsedForBills > 0) {
+        await connection.execute(`
+          INSERT INTO deposit_transactions (
+            tenant_id, transaction_type, amount, description, created_by
+          ) VALUES (?, 'security_used_bills', ?, ?, 'system')
+        `, [
+          tenantData.id, 
+          securityDepositUsedForBills, 
+          `Security deposit used for outstanding bills`,
+          'admin'
+        ])
+      }
+
+      // Move tenant to history table
+      await connection.execute(`
+        INSERT INTO tenant_history (
+          original_tenant_id, name, mobile, email, address, 
+          room_id, room_number, branch_name,
+          rent_start, rent_end, contract_start_date, contract_end_date, 
+          contract_duration_months, contract_completed,
+          initial_electric_reading, final_electric_reading,
+          advance_payment, security_deposit,
+          advance_payment_status, security_deposit_status,
+          advance_payment_refund_amount, advance_payment_used_last_month,
+          security_deposit_refund_amount, security_deposit_used_for_bills,
+          total_bills_paid, total_bills_unpaid,
+          reason_for_leaving, notes, deleted_by
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `, [
+        tenantData.id, tenantData.name, tenantData.mobile, tenantData.email, tenantData.address,
+        tenantData.room_id, tenantData.room_number, tenantData.branch_name,
+        tenantData.rent_start, currentDate.toISOString().split('T')[0], 
+        tenantData.contract_start_date, tenantData.contract_end_date,
+        tenantData.contract_duration_months, isContractCompleted,
+        tenantData.initial_electric_reading, final_electric_reading,
+        tenantData.advance_payment, tenantData.security_deposit,
+        tenantData.advance_payment_status, tenantData.security_deposit_status,
+        advancePaymentRefund, advancePaymentUsedLastMonth,
+        securityDepositRefund, securityDepositUsedForBills,
+        paidBills[0].total_amount, unpaidBills[0].total_amount,
+        reason_for_leaving, notes, 'admin'
+      ])
+
+      // Move email notifications to history (don't delete)
+      // Keep email notifications for audit trail
+
+      // Don't modify bills - keep the tenant_id reference for historical tracking
+      // The bills will remain linked to the original tenant_id for audit purposes
+
+      // Free up the room if tenant was assigned to one
+      if (tenantData.room_id) {
+        await connection.execute(
+          'UPDATE rooms SET status = ? WHERE id = ?',
+          ['vacant', tenantData.room_id]
+        )
+      }
+
+      // Delete the tenant from active table
+      await connection.execute(
+        'DELETE FROM tenants WHERE id = ?',
+        [id]
+      )
+
+      // Commit transaction
+      await connection.commit()
+
+      // Send departure email if tenant has email
+      let emailStatus = null
+      if (tenantData.email) {
+        try {
+          const emailService = (await import('../../../../services/emailService.js')).default
+          
+          const departureInfo = {
+            tenant_name: tenantData.name,
+            room_number: tenantData.room_number,
+            branch_name: tenantData.branch_name,
+            rent_start: tenantData.rent_start,
+            rent_end: currentDate.toISOString().split('T')[0],
+            contract_completed: isContractCompleted,
+            security_deposit_refund: securityDepositRefund,
+            reason_for_leaving: reason_for_leaving,
+            total_bills_paid: paidBills[0].total_amount,
+            total_bills_unpaid: unpaidBills[0].total_amount
+          }
+          
+          await emailService.sendDepartureEmail(tenantData.email, departureInfo)
+          emailStatus = { success: true, message: 'Departure email sent successfully' }
+          console.log(`✅ Departure email sent to ${tenantData.name} (${tenantData.email})`)
+        } catch (emailError) {
+          console.error('Failed to send departure email:', emailError)
+          emailStatus = { success: false, error: emailError.message }
+        }
+      } else {
+        emailStatus = { success: false, message: 'No email address on file' }
+      }
+
+      return NextResponse.json({
+        success: true,
+        message: `Tenant "${tenantData.name}" moved out successfully`,
+        tenant_history: {
+          id: tenantData.id,
+          name: tenantData.name,
+          room_freed: tenantData.room_id ? true : false,
+          contract_completed: isContractCompleted,
+          advance_payment_refund: advancePaymentRefund,
+          advance_payment_used_last_month: advancePaymentUsedLastMonth,
+          security_deposit_refund: securityDepositRefund,
+          security_deposit_used_for_bills: securityDepositUsedForBills,
+          reason_for_leaving: reason_for_leaving,
+          final_bill_created: finalBillId ? true : false,
+          final_bill_id: finalBillId,
+          bills_status: {
+            paid_bills: paidBills[0].count,
+            paid_amount: paidBills[0].total_amount,
+            unpaid_bills: unpaidBills[0].count,
+            unpaid_amount: unpaidBills[0].total_amount
+          },
+          email_status: emailStatus
+        }
+      })
+
+    } catch (transactionError) {
+      // Rollback transaction on error
+      await connection.rollback()
+      throw transactionError
+    } finally {
+      // Release connection
+      connection.release()
+    }
+
+  } catch (error) {
+    console.error('Tenant deletion error:', error)
+    return NextResponse.json(
+      { success: false, message: 'Internal server error' },
+      { status: 500 }
+    )
+  }
+} 

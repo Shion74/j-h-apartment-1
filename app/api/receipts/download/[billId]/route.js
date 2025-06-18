@@ -19,7 +19,7 @@ export async function GET(request, { params }) {
     const { billId } = params
 
     // Get bill details
-    const [billRows] = await pool.execute(`
+    const billRowsResult = await pool.query(`
       SELECT 
         b.*,
         t.name as tenant_name,
@@ -30,9 +30,10 @@ export async function GET(request, { params }) {
       JOIN tenants t ON b.tenant_id = t.id
       JOIN rooms r ON b.room_id = r.id
       LEFT JOIN branches br ON r.branch_id = br.id
-      WHERE b.id = ?
+      WHERE b.id = $1
     `, [billId])
 
+    const billRows = billRowsResult.rows
     if (billRows.length === 0) {
       return NextResponse.json(
         { success: false, message: 'Bill not found' },
@@ -50,11 +51,12 @@ export async function GET(request, { params }) {
     }
 
     // Get payments for this bill
-    const [payments] = await pool.execute(
+    const paymentsResult = await pool.query(
       'SELECT * FROM payments WHERE bill_id = ? ORDER BY payment_date',
       [billId]
     )
 
+    const payments = paymentsResult.rows
     // Check if receipt already exists
     const receiptsDir = path.join(process.cwd(), 'public', 'receipts')
     

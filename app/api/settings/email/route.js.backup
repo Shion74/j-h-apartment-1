@@ -1,0 +1,127 @@
+import { NextResponse } from 'next/server'
+import { pool } from '../../../../lib/database'
+import { requireAuth } from '../../../../lib/auth'
+
+export async function GET(request) {
+  try {
+    // Check authentication
+    const authResult = requireAuth(request)
+    if (authResult.error) {
+      return NextResponse.json(
+        { success: false, message: authResult.error },
+        { status: authResult.status }
+      )
+    }
+
+    // Get email settings from database
+    const [settings] = await pool.execute(`
+      SELECT setting_key, setting_value 
+      FROM settings 
+      WHERE setting_key IN (
+        'smtp_host', 'smtp_port', 'smtp_user', 'smtp_password', 
+        'smtp_from_email', 'smtp_from_name'
+      )
+    `)
+
+    // Format settings into object
+    const emailSettings = {
+      smtp_host: '',
+      smtp_port: '587',
+      smtp_user: '',
+      smtp_password: '',
+      smtp_from_email: 'admin@jhapartment.com',
+      smtp_from_name: 'J&H Apartment Management'
+    }
+
+    settings.forEach(setting => {
+      emailSettings[setting.setting_key] = setting.setting_value
+    })
+
+    return NextResponse.json({
+      success: true,
+      settings: emailSettings
+    })
+
+  } catch (error) {
+    console.error('Email settings fetch error:', error)
+    return NextResponse.json(
+      { success: false, message: 'Internal server error' },
+      { status: 500 }
+    )
+  }
+}
+
+export async function PUT(request) {
+  try {
+    // Check authentication
+    const authResult = requireAuth(request)
+    if (authResult.error) {
+      return NextResponse.json(
+        { success: false, message: authResult.error },
+        { status: authResult.status }
+      )
+    }
+
+    const emailSettings = await request.json()
+    
+    const validSettings = [
+      'smtp_host', 'smtp_port', 'smtp_user', 'smtp_password', 
+      'smtp_from_email', 'smtp_from_name'
+    ]
+
+    // Start transaction
+    const connection = await pool.getConnection()
+    await connection.beginTransaction()
+
+    try {
+      // Update each setting
+      for (const [key, value] of Object.entries(emailSettings)) {
+        if (validSettings.includes(key)) {
+          await connection.execute(`
+            INSERT INTO settings (setting_key, setting_value, description) 
+            VALUES (?, ?, ?)
+            ON DUPLICATE KEY UPDATE 
+            setting_value = VALUES(setting_value),
+            updated_at = CURRENT_TIMESTAMP
+          `, [
+            key, 
+            value || '', 
+            getSettingDescription(key)
+          ])
+        }
+      }
+
+      await connection.commit()
+      connection.release()
+
+      return NextResponse.json({
+        success: true,
+        message: 'Email settings updated successfully'
+      })
+
+    } catch (error) {
+      await connection.rollback()
+      connection.release()
+      throw error
+    }
+
+  } catch (error) {
+    console.error('Email settings update error:', error)
+    return NextResponse.json(
+      { success: false, message: 'Internal server error' },
+      { status: 500 }
+    )
+  }
+}
+
+function getSettingDescription(key) {
+  const descriptions = {
+    'smtp_host': 'SMTP server host for email notifications',
+    'smtp_port': 'SMTP server port',
+    'smtp_user': 'SMTP username for authentication',
+    'smtp_password': 'SMTP password for authentication',
+    'smtp_from_email': 'From email address for notifications',
+    'smtp_from_name': 'From name for email notifications'
+  }
+  return descriptions[key] || ''
+} 

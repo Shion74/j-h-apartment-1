@@ -1,13 +1,13 @@
-const { pool } = require('../config/database');
+import { pool } from '../lib/database.js';
 
 class Setting {
   // Get all settings
   static async findAll() {
     try {
-      const [rows] = await pool.execute(
+      const result = await pool.query(
         'SELECT * FROM settings ORDER BY setting_key'
       );
-      return rows;
+      return result.rows;
     } catch (error) {
       console.error('Error finding all settings:', error);
       throw error;
@@ -17,11 +17,11 @@ class Setting {
   // Get setting by key
   static async findByKey(key) {
     try {
-      const [rows] = await pool.execute(
-        'SELECT * FROM settings WHERE setting_key = ?',
+      const result = await pool.query(
+        'SELECT * FROM settings WHERE setting_key = $1',
         [key]
       );
-      return rows[0] || null;
+      return result.rows[0] || null;
     } catch (error) {
       console.error('Error finding setting by key:', error);
       throw error;
@@ -42,15 +42,18 @@ class Setting {
   // Update setting value (create if doesn't exist)
   static async updateValue(key, value, description = null) {
     try {
-      // Use INSERT ... ON DUPLICATE KEY UPDATE for upsert functionality
-      const [result] = await pool.execute(`
-        INSERT INTO settings (setting_key, setting_value, description) 
-        VALUES (?, ?, ?)
-        ON DUPLICATE KEY UPDATE 
-        setting_value = VALUES(setting_value),
-        description = COALESCE(VALUES(description), description)
-      `, [key, value, description]);
+      console.log('Setting.updateValue called:', { key, value, description });
       
+      // Use INSERT ... ON CONFLICT for upsert functionality (PostgreSQL)
+      const result = await pool.query(`
+        INSERT INTO settings (setting_key, setting_value, description) 
+        VALUES ($1, $2, $3)
+        ON CONFLICT (setting_key) DO UPDATE SET 
+        setting_value = EXCLUDED.setting_value,
+        description = COALESCE(EXCLUDED.description, settings.description)
+      `, [key, value.toString(), description]);
+      
+      console.log('Database update result:', result);
       return true; // Always return true since upsert always succeeds
     } catch (error) {
       console.error('Error updating setting:', error);
@@ -61,13 +64,13 @@ class Setting {
   // Create new setting
   static async create(key, value, description = null) {
     try {
-      const [result] = await pool.execute(
-        'INSERT INTO settings (setting_key, setting_value, description) VALUES (?, ?, ?)',
+      const result = await pool.query(
+        'INSERT INTO settings (setting_key, setting_value, description) VALUES ($1, $2, $3) RETURNING id',
         [key, value, description]
       );
       
       return {
-        id: result.insertId,
+        id: result.rows[0].id,
         setting_key: key,
         setting_value: value,
         description
@@ -81,7 +84,7 @@ class Setting {
   // Get current rates for billing
   static async getBillingRates() {
     try {
-      const electricRate = await this.getValue('electric_rate_per_kwh') || 12.00;
+      const electricRate = await this.getValue('electric_rate_per_kwh') || 11.00;
       const waterAmount = await this.getValue('water_fixed_amount') || 200.00;
       const roomRate = await this.getValue('default_room_rate') || 3500.00;
       
@@ -122,4 +125,4 @@ class Setting {
   }
 }
 
-module.exports = Setting; 
+export default Setting; 

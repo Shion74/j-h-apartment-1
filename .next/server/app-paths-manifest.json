@@ -1,3 +1,17 @@
 {
-  "/api/bills/reminders/route": "app/api/bills/reminders/route.js"
+  "/dashboard/page": "app/dashboard/page.js",
+  "/billing/page": "app/billing/page.js",
+  "/reports/page": "app/reports/page.js",
+  "/history/page": "app/history/page.js",
+  "/api/dashboard/stats/route": "app/api/dashboard/stats/route.js",
+  "/api/branches/route": "app/api/branches/route.js",
+  "/api/bills/route": "app/api/bills/route.js",
+  "/api/settings/billing-rates/route": "app/api/settings/billing-rates/route.js",
+  "/api/bills/reminders/route": "app/api/bills/reminders/route.js",
+  "/rooms/page": "app/rooms/page.js",
+  "/api/rooms/route": "app/api/rooms/route.js",
+  "/api/reports/monthly/route": "app/api/reports/monthly/route.js",
+  "/settings/page": "app/settings/page.js",
+  "/account/page": "app/account/page.js",
+  "/api/settings/email/route": "app/api/settings/email/route.js"
 }

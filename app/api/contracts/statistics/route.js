@@ -14,7 +14,7 @@ export async function GET(request) {
     }
 
     // Get contract statistics
-    const [stats] = await pool.execute(`
+    const statsResult = await pool.query(`
       SELECT 
         contract_status,
         COUNT(*) as count,
@@ -26,13 +26,13 @@ export async function GET(request) {
     `)
     
     // Get contracts expiring in 30 days
-    const [expiring] = await pool.execute(`
+    const expiringResult = await pool.query(`
       SELECT COUNT(*) as count
       FROM tenants t
       WHERE t.contract_status = 'active'
         AND t.contract_end_date IS NOT NULL
-        AND DATEDIFF(t.contract_end_date, CURDATE()) <= 30
-        AND DATEDIFF(t.contract_end_date, CURDATE()) > 0
+        AND DATE_PART('day', t.contract_end_date - CURRENT_DATE) <= 30
+        AND DATE_PART('day', t.contract_end_date - CURRENT_DATE) > 0
     `)
 
     return NextResponse.json({

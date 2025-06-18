@@ -46,14 +46,14 @@ export default function LoginPage() {
       if (data.success) {
         localStorage.setItem('token', data.token)
         localStorage.setItem('user', JSON.stringify(data.user))
-        toast.success('Login successful!')
+        toast.success('Login successful')
         router.push('/dashboard')
       } else {
         toast.error(data.message || 'Login failed')
       }
     } catch (error) {
       console.error('Login error:', error)
-      toast.error('Login failed. Please try again.')
+              toast.error('Login failed')
     } finally {
       setIsLoading(false)
     }
@@ -61,7 +61,7 @@ export default function LoginPage() {
 
   return (
     <>
-      <Toaster position="top-right" />
+              <Toaster position="top-center" />
       <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-blue-500 to-purple-600 py-12 px-4 sm:px-6 lg:px-8">
         <div className="max-w-md w-full space-y-8">
           {/* Header */}

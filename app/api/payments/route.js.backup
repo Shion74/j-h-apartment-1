@@ -1,0 +1,371 @@
+import { NextResponse } from 'next/server'
+import { pool } from '../../../lib/database'
+import { requireAuth } from '../../../lib/auth'
+
+export async function GET(request) {
+  try {
+    // Check authentication
+    const authResult = requireAuth(request)
+    if (authResult.error) {
+      return NextResponse.json(
+        { success: false, message: authResult.error },
+        { status: authResult.status }
+      )
+    }
+
+    // Get all payments with bill and tenant details
+    const [payments] = await pool.execute(`
+      SELECT 
+        p.*,
+        b.rent_from,
+        b.rent_to,
+        b.total_amount as bill_total,
+        t.name as tenant_name,
+        r.room_number,
+        br.name as branch_name
+      FROM payments p
+      LEFT JOIN bills b ON p.bill_id = b.id
+      LEFT JOIN tenants t ON b.tenant_id = t.id
+      LEFT JOIN rooms r ON b.room_id = r.id
+      LEFT JOIN branches br ON r.branch_id = br.id
+      ORDER BY p.payment_date DESC
+    `)
+
+    return NextResponse.json({
+      success: true,
+      payments
+    })
+
+  } catch (error) {
+    console.error('Payments fetch error:', error)
+    return NextResponse.json(
+      { success: false, message: 'Internal server error' },
+      { status: 500 }
+    )
+  }
+}
+
+export async function POST(request) {
+  try {
+    // Check authentication
+    const authResult = requireAuth(request)
+    if (authResult.error) {
+      return NextResponse.json(
+        { success: false, message: authResult.error },
+        { status: authResult.status }
+      )
+    }
+
+    const {
+      bill_id,
+      payment_amount,
+      payment_method, // 'regular' or 'deposit'
+      payment_type, // for regular: 'cash', 'gcash', 'bank', etc. for deposit: 'advance' or 'security'
+      actual_payment_date, // actual date when tenant made the payment
+      notes
+    } = await request.json()
+
+    // Validation
+    if (!bill_id || !payment_amount || !payment_method) {
+      return NextResponse.json(
+        { success: false, message: 'Required fields missing' },
+        { status: 400 }
+      )
+    }
+
+    // Get bill and tenant details
+    const [billData] = await pool.execute(`
+      SELECT 
+        b.*,
+        t.advance_payment,
+        t.security_deposit,
+        t.advance_payment_status,
+        t.security_deposit_status,
+        t.name as tenant_name,
+        t.email as tenant_email,
+        r.room_number
+      FROM bills b
+      LEFT JOIN tenants t ON b.tenant_id = t.id
+      LEFT JOIN rooms r ON b.room_id = r.id
+      WHERE b.id = ?
+    `, [bill_id])
+
+    if (billData.length === 0) {
+      return NextResponse.json(
+        { success: false, message: 'Bill not found' },
+        { status: 404 }
+      )
+    }
+
+    const bill = billData[0]
+    const requestedAmount = parseFloat(payment_amount)
+    
+    // Calculate penalty fee if payment is late (more than 10 days after bill date)
+    let penaltyFee = 0
+    const paymentDate = actual_payment_date ? new Date(actual_payment_date) : new Date()
+    const billDate = new Date(bill.bill_date)
+    const dueDate = new Date(bill.due_date || billDate.getTime() + (10 * 24 * 60 * 60 * 1000)) // 10 days after bill date
+    
+    // Check if payment is late and penalty hasn't been applied yet
+    if (paymentDate > dueDate && !bill.penalty_applied) {
+      penaltyFee = parseFloat(bill.total_amount) * 0.01 // 1% of total bill amount
+      console.log(`⚠️ Late payment detected: Payment date ${paymentDate.toDateString()} > Due date ${dueDate.toDateString()}`)
+      console.log(`💰 Penalty fee calculated: ₱${penaltyFee.toFixed(2)} (1% of ₱${bill.total_amount})`)
+    }
+
+    // Handle payment method mapping
+    let actualPaymentMethod
+    if (payment_method === 'regular') {
+      // Map frontend payment types to database enum values
+      const paymentTypeMapping = {
+        'cash': 'cash',
+        'gcash': 'other', // GCash maps to 'other'
+        'bank': 'bank_transfer',
+        'check': 'check',
+        'other': 'other'
+      }
+      actualPaymentMethod = paymentTypeMapping[payment_type] || 'cash'
+    } else if (payment_method === 'deposit') {
+      // For deposit payments
+      if (payment_type === 'advance') {
+        actualPaymentMethod = 'advance_payment'
+      } else if (payment_type === 'security') {
+        actualPaymentMethod = 'security_deposit'
+      } else {
+        actualPaymentMethod = 'other'
+      }
+    } else {
+      // Direct payment method (for backward compatibility)
+      actualPaymentMethod = payment_method
+    }
+
+    // Validate payment method against database enum
+    const validPaymentMethods = ['cash', 'bank_transfer', 'check', 'advance_payment', 'security_deposit', 'other']
+    if (!validPaymentMethods.includes(actualPaymentMethod)) {
+      return NextResponse.json(
+        { success: false, message: `Invalid payment method: ${payment_method}/${payment_type}` },
+        { status: 400 }
+      )
+    }
+
+    // Use connection for transaction
+    const connection = await pool.getConnection()
+    
+    try {
+      await connection.beginTransaction()
+
+      // Apply penalty fee to bill if applicable
+      if (penaltyFee > 0) {
+        await connection.execute(`
+          UPDATE bills 
+          SET penalty_fee_amount = ?, penalty_applied = TRUE, total_amount = total_amount + ?
+          WHERE id = ?
+        `, [penaltyFee, penaltyFee, bill_id])
+        
+        console.log(`✅ Applied penalty fee of ₱${penaltyFee.toFixed(2)} to bill ${bill_id}`)
+      }
+
+      // Insert payment record with actual payment date
+      const [paymentResult] = await connection.execute(`
+        INSERT INTO payments (
+          bill_id, amount, payment_date, actual_payment_date, payment_method, notes
+        ) VALUES (?, ?, CURDATE(), ?, ?, ?)
+      `, [
+        bill_id, requestedAmount, actual_payment_date || new Date().toISOString().split('T')[0], actualPaymentMethod, notes || ''
+      ])
+
+      // If using deposit payment methods, update tenant deposits
+      if (actualPaymentMethod === 'advance_payment' && payment_type === 'advance') {
+        const availableAdvance = parseFloat(bill.advance_payment) || 0
+        const newAdvanceAmount = availableAdvance - requestedAmount
+        
+        await connection.execute(
+          'UPDATE tenants SET advance_payment = ? WHERE id = ?',
+          [Math.max(0, newAdvanceAmount), bill.tenant_id]
+        )
+      } else if (actualPaymentMethod === 'security_deposit' && payment_type === 'security') {
+        const availableSecurity = parseFloat(bill.security_deposit) || 0
+        const newSecurityAmount = availableSecurity - requestedAmount
+        
+        await connection.execute(
+          'UPDATE tenants SET security_deposit = ? WHERE id = ?',
+          [Math.max(0, newSecurityAmount), bill.tenant_id]
+        )
+      }
+
+      // Calculate total payments for this bill
+      const [totalPaid] = await connection.execute(`
+        SELECT COALESCE(SUM(amount), 0) as total_paid
+        FROM payments 
+        WHERE bill_id = ?
+      `, [bill_id])
+
+      // Get updated bill total (including penalty if applied)
+      const [updatedBill] = await connection.execute(`
+        SELECT total_amount FROM bills WHERE id = ?
+      `, [bill_id])
+
+      const totalPaidAmount = parseFloat(totalPaid[0].total_paid)
+      const billTotal = parseFloat(updatedBill[0].total_amount)
+      
+      // Update bill status
+      let billStatus = 'unpaid'
+      if (totalPaidAmount >= billTotal) {
+        billStatus = 'paid'
+      } else if (totalPaidAmount > 0) {
+        billStatus = 'partial'
+      }
+
+      await connection.execute(`
+        UPDATE bills SET status = ? WHERE id = ?
+      `, [billStatus, bill_id])
+
+      // Commit transaction
+      await connection.commit()
+
+      // Get updated payment details
+      const [newPayment] = await pool.execute(`
+        SELECT 
+          p.*,
+          b.total_amount as bill_total,
+          t.name as tenant_name,
+          t.email as tenant_email,
+          r.room_number
+        FROM payments p
+        LEFT JOIN bills b ON p.bill_id = b.id
+        LEFT JOIN tenants t ON b.tenant_id = t.id
+        LEFT JOIN rooms r ON b.room_id = r.id
+        WHERE p.id = ?
+      `, [paymentResult.insertId])
+
+      // Send receipt email if tenant has email and bill is fully paid
+      let receiptStatus = null
+      if (billStatus === 'paid' && newPayment[0].tenant_email) {
+        try {
+          // Import services for receipt generation and email sending
+          const emailService = (await import('../../../services/emailService.js')).default
+          const receiptService = (await import('../../../services/receiptService.js')).default
+          
+          // Get all payments for this bill for the receipt
+          const [allPayments] = await connection.execute(`
+            SELECT * FROM payments 
+            WHERE bill_id = ? 
+            ORDER BY payment_date ASC
+          `, [bill_id])
+
+          // Generate PDF receipt
+          const pdfBuffer = await receiptService.generateReceiptPDF(bill, allPayments)
+
+          // Send email with receipt
+          const emailResult = await emailService.sendReceiptToTenant(
+            bill, 
+            allPayments, 
+            newPayment[0].tenant_email, 
+            pdfBuffer
+          )
+
+          receiptStatus = {
+            email_sent: emailResult.success,
+            email_message: emailResult.success ? 'Receipt sent successfully' : emailResult.error,
+            recipient: newPayment[0].tenant_email
+          }
+        } catch (emailError) {
+          console.error('Receipt email error:', emailError)
+          receiptStatus = {
+            email_sent: false,
+            email_message: 'Failed to send receipt email: ' + emailError.message,
+            recipient: newPayment[0].tenant_email
+          }
+        }
+      } else if (billStatus === 'paid' && !newPayment[0].tenant_email) {
+        receiptStatus = {
+          email_sent: false,
+          email_message: 'No email address on file for tenant',
+          recipient: null
+        }
+      }
+
+      return NextResponse.json({
+        success: true,
+        message: 'Payment completed successfully',
+        payment: newPayment[0],
+        bill_status: billStatus,
+        total_paid: totalPaidAmount,
+        remaining_balance: billTotal - totalPaidAmount,
+        receipt: receiptStatus
+      })
+
+    } catch (error) {
+      // Rollback transaction
+      await connection.rollback()
+      throw error
+    } finally {
+      // Release connection
+      connection.release()
+    }
+
+  } catch (error) {
+    console.error('Payment creation error:', error)
+    return NextResponse.json(
+      { success: false, message: 'Internal server error' },
+      { status: 500 }
+    )
+  }
+}
+
+// Get payment statistics
+export async function GET_STATS(request) {
+  try {
+    // Check authentication
+    const authResult = requireAuth(request)
+    if (authResult.error) {
+      return NextResponse.json(
+        { success: false, message: authResult.error },
+        { status: authResult.status }
+      )
+    }
+
+    // Get current month
+    const currentMonth = new Date().toISOString().slice(0, 7) // YYYY-MM
+
+    // Calculate statistics
+    const [monthlyStats] = await pool.execute(`
+      SELECT 
+        COALESCE(SUM(amount), 0) as monthly_collected,
+        COUNT(*) as monthly_payments
+      FROM payments 
+      WHERE DATE_FORMAT(payment_date, '%Y-%m') = ?
+    `, [currentMonth])
+
+    const [totalStats] = await pool.execute(`
+      SELECT 
+        COALESCE(SUM(amount), 0) as total_collected,
+        COUNT(*) as total_payments
+      FROM payments
+    `)
+
+    const [averageStats] = await pool.execute(`
+      SELECT 
+        COALESCE(AVG(amount), 0) as average_payment
+      FROM payments
+    `)
+
+    return NextResponse.json({
+      success: true,
+      stats: {
+        monthly_collected: parseFloat(monthlyStats[0].monthly_collected),
+        monthly_payments: monthlyStats[0].monthly_payments,
+        total_collected: parseFloat(totalStats[0].total_collected),
+        total_payments: totalStats[0].total_payments,
+        average_payment: parseFloat(averageStats[0].average_payment)
+      }
+    })
+
+  } catch (error) {
+    console.error('Payment stats error:', error)
+    return NextResponse.json(
+      { success: false, message: 'Internal server error' },
+      { status: 500 }
+    )
+  }
+} 

@@ -74,27 +74,93 @@ export async function GET(request, { params }) {
       WHERE tenant_id = $1 AND status = 'paid'
     `, [id])
 
-    // Get last bill info for billing calculations
+    // Get last bill info for billing calculations (check both active bills and bill_history)
     const lastBillResult = await pool.query(`
-      SELECT electric_present_reading, rent_to, rent_from
+      SELECT electric_present_reading, rent_to, rent_from, 'active' as source
       FROM bills 
       WHERE tenant_id = $1
+      UNION ALL
+      SELECT electric_present_reading, rent_to, rent_from, 'archived' as source
+      FROM bill_history 
+      WHERE original_tenant_id = $1
       ORDER BY rent_to DESC 
       LIMIT 1
     `, [id])
 
     const lastBill = lastBillResult.rows
-    const lastElectricReading = lastBill.length > 0 ? parseFloat(lastBill[0].electric_present_reading || 0) : 0
+    const lastElectricReading = lastBill.length > 0 ? lastBill[0].electric_present_reading || 0 : 0
     const lastBillEndDate = lastBill.length > 0 ? lastBill[0].rent_to : null
+    const lastBillSource = lastBill.length > 0 ? lastBill[0].source : null
+    
+    console.log('Last bill info:', { 
+      lastBillEndDate, 
+      lastElectricReading, 
+      source: lastBillSource,
+      tenant_id: id 
+    })
     
     // Calculate the next billing period start date (day after last bill ended)
     let nextBillStartDate = null
     if (lastBillEndDate) {
-      const endDate = new Date(lastBillEndDate)
-      nextBillStartDate = new Date(endDate.getTime() + 24 * 60 * 60 * 1000) // Add 1 day
+      try {
+        // The database stores dates, and we need to properly handle them for the current billing cycle
+        // If the last bill ended on June 6, then the current billing cycle starts on June 7
+        
+        console.log('Last bill end date from DB:', lastBillEndDate)
+        
+        // Handle both string and Date object cases
+        let endDate
+        if (lastBillEndDate instanceof Date) {
+          // If it's already a Date object, use it directly
+          endDate = new Date(lastBillEndDate)
+        } else {
+          // If it's a string, parse it properly
+          endDate = new Date(lastBillEndDate + 'T00:00:00.000Z')
+        }
+        
+        // Validate the date
+        if (isNaN(endDate.getTime())) {
+          console.error('Invalid lastBillEndDate:', lastBillEndDate)
+          // Fallback to tenant's rent_start date
+          endDate = new Date(tenantData.rent_start + 'T00:00:00.000Z')
+          if (isNaN(endDate.getTime())) {
+            throw new Error('Both lastBillEndDate and rent_start are invalid')
+          }
+        }
+        
+        // Add 1 day to get the start of the current billing cycle
+        const nextBillStart = new Date(endDate)
+        nextBillStart.setUTCDate(nextBillStart.getUTCDate() + 1)
+        
+        // Validate the calculated date
+        if (isNaN(nextBillStart.getTime())) {
+          console.error('Invalid calculated nextBillStart date')
+          nextBillStartDate = null
+        } else {
+          nextBillStartDate = nextBillStart
+          console.log('Parsed end date:', endDate.toISOString().split('T')[0])
+          console.log('Calculated next bill start date:', nextBillStart.toISOString().split('T')[0])
+          console.log('This should be the current billing cycle start date for final billing')
+        }
+      } catch (dateError) {
+        console.error('Error processing lastBillEndDate:', dateError)
+        nextBillStartDate = null
+      }
     } else {
       // If no bills exist, use rent_start date
-      nextBillStartDate = new Date(tenantData.rent_start)
+      try {
+        const rentStartDate = new Date(tenantData.rent_start + 'T00:00:00.000Z')
+        if (isNaN(rentStartDate.getTime())) {
+          console.error('Invalid rent_start date:', tenantData.rent_start)
+          nextBillStartDate = null
+        } else {
+          nextBillStartDate = rentStartDate
+          console.log('No bills found, using rent_start date:', rentStartDate.toISOString().split('T')[0])
+        }
+      } catch (dateError) {
+        console.error('Error processing rent_start date:', dateError)
+        nextBillStartDate = null
+      }
     }
 
     // Check if contract is completed
@@ -104,8 +170,35 @@ export async function GET(request, { params }) {
     const isEarlyTermination = currentDate < contractEndDate
 
     // Calculate deposit refund
-    const securityDepositAmount = parseFloat(tenantData.security_deposit || 0)
-    const securityUsedForBills = parseFloat(tenantData.security_used_for_bills || 0)
+    // Get tenant deposits from tenant_deposits table
+    const depositsResult = await pool.query(`
+      SELECT 
+        deposit_type,
+        initial_amount,
+        remaining_balance,
+        status
+      FROM tenant_deposits 
+      WHERE tenant_id = $1 AND status = 'active'
+    `, [id])
+
+    // Calculate balances for each deposit type
+    const advanceDeposit = depositsResult.rows.find(d => d.deposit_type === 'advance')
+    const securityDeposit = depositsResult.rows.find(d => d.deposit_type === 'security')
+    
+    const advancePaymentAmount = parseFloat(advanceDeposit?.initial_amount || 0)
+    const advancePaymentBalance = parseFloat(advanceDeposit?.remaining_balance || 0)
+    const securityDepositAmount = parseFloat(securityDeposit?.initial_amount || 0)
+    const securityDepositBalance = parseFloat(securityDeposit?.remaining_balance || 0)
+    
+    console.log('Tenant deposits from tenant_deposits table:', {
+      advanceDeposit,
+      securityDeposit,
+      advancePaymentAmount,
+      advancePaymentBalance,
+      securityDepositAmount,
+      securityDepositBalance
+    })
+
     const unpaidBills = unpaidBillsResult.rows
     const paidBills = paidBillsResult.rows
     const currentMonthPayment = currentMonthPaymentResult.rows
@@ -114,14 +207,9 @@ export async function GET(request, { params }) {
     
     let securityDepositRefund = 0
     if (isContractCompleted && unpaidBills[0].count === 0) {
-      securityDepositRefund = Math.max(0, securityDepositAmount - securityUsedForBills)
+      securityDepositRefund = securityDepositBalance
     }
 
-    // Advance payment handling
-    const advancePaymentAmount = parseFloat(tenantData.advance_payment || 0)
-    const advanceUsedForBills = parseFloat(tenantData.advance_used_for_bills || 0)
-    const advancePaymentBalance = Math.max(0, advancePaymentAmount - advanceUsedForBills)
-    
     // Business rule: Advance payment can only be used for last month if contract is completed
     const canUseAdvancePaymentForLastMonth = isContractCompleted && advancePaymentBalance > 0
 
@@ -148,8 +236,10 @@ export async function GET(request, { params }) {
       },
       billing_info: {
         last_electric_reading: lastElectricReading,
+        last_electric_reading_date: lastBill.length > 0 ? lastBill[0].rent_to : null,
         last_bill_end_date: lastBillEndDate,
-        next_bill_start_date: nextBillStartDate ? nextBillStartDate.toISOString().split('T')[0] : null
+        last_bill_source: lastBillSource,
+        next_bill_start_date: nextBillStartDate && !isNaN(nextBillStartDate.getTime()) ? nextBillStartDate.toISOString().split('T')[0] : null
       },
       payment_status: {
         current_month_paid: currentMonthPaid,
@@ -170,9 +260,9 @@ export async function GET(request, { params }) {
       deposit_info: {
         advance_payment: {
           original_amount: advancePaymentAmount,
-          used_for_bills: advanceUsedForBills,
+          used_for_bills: advancePaymentAmount - advancePaymentBalance,
           remaining_balance: advancePaymentBalance,
-          status: tenantData.advance_payment_status,
+          status: advanceDeposit?.status || 'inactive',
           can_use_for_last_month: canUseAdvancePaymentForLastMonth,
           refundable_on_early_termination: isEarlyTermination && advancePaymentBalance > 0,
           business_rule: isEarlyTermination ?
@@ -181,10 +271,10 @@ export async function GET(request, { params }) {
         },
         security_deposit: {
           original_amount: securityDepositAmount,
-          used_for_bills: securityUsedForBills,
-          remaining_balance: Math.max(0, securityDepositAmount - securityUsedForBills),
+          used_for_bills: securityDepositAmount - securityDepositBalance,
+          remaining_balance: securityDepositBalance,
           refund_amount: securityDepositRefund,
-          status: tenantData.security_deposit_status,
+          status: securityDeposit?.status || 'inactive',
           refundable: isContractCompleted && unpaidBills[0].count === 0
         }
       },
@@ -196,16 +286,7 @@ export async function GET(request, { params }) {
           'Unknown reason'
         ) : null,
         warnings: [
-          ...(isEarlyTermination ? [
-            `Contract ends in ${daysRemaining} days - early termination`,
-            `Advance payment (₱${advancePaymentBalance.toLocaleString()}) will be refunded`,
-            `Security deposit will be kept (business rule for early termination)`
-          ] : []),
-          ...(isContractCompleted && canUseAdvancePaymentForLastMonth ? [
-            `Advance payment (₱${advancePaymentBalance.toLocaleString()}) can be used for last month rent`
-          ] : []),
-          ...(unpaidAmount > 0 ? [`₱${unpaidAmount.toLocaleString()} in unpaid bills`] : []),
-          ...(securityDepositRefund > 0 ? [`₱${securityDepositRefund.toLocaleString()} security deposit refund due`] : [])
+          ...(unpaidAmount > 0 ? [`₱${unpaidAmount.toLocaleString()} in unpaid bills`] : [])
         ]
       }
     })

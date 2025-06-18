@@ -27,14 +27,15 @@ export async function POST(request, { params }) {
     }
 
     // Get tenant with deposit information
-    const [tenants] = await pool.execute(`
+    const tenantsResult = await pool.query(`
       SELECT t.*, r.room_number, b.name as branch_name, b.address as branch_address
       FROM tenants t
       LEFT JOIN rooms r ON t.room_id = r.id
       LEFT JOIN branches b ON r.branch_id = b.id
-      WHERE t.id = ?
+      WHERE t.id = $1
     `, [tenantId])
 
+    const tenants = tenantsResult.rows
     if (tenants.length === 0) {
       return NextResponse.json(
         { success: false, message: 'Tenant not found' },
@@ -94,10 +95,10 @@ export async function POST(request, { params }) {
         await emailService.sendDepositReceipt(tenant, pdfBuffer)
         
         // Log email notification
-        await pool.execute(`
+        await pool.query(`
           INSERT INTO email_notifications 
           (tenant_id, email_type, email_subject, recipient_email, status, sent_at) 
-          VALUES (?, 'deposit_receipt', 'Deposit Receipt - J&H Apartment', ?, 'sent', NOW())
+          VALUES ($2, 'deposit_receipt', 'Deposit Receipt - J&H Apartment', $3, 'sent', NOW() RETURNING id)
         `, [tenant.id, tenant.email])
 
         return NextResponse.json({

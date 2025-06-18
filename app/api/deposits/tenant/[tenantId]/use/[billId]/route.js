@@ -37,11 +37,12 @@ export async function POST(request, { params }) {
     }
 
     // Get tenant deposit information
-    const [tenantRows] = await pool.execute(
+    const tenantRowsResult = await pool.query(
       'SELECT advance_payment, security_deposit, deposit_status FROM tenants WHERE id = ?',
       [tenantId]
     )
 
+    const tenantRows = tenantRowsResult.rows
     if (tenantRows.length === 0) {
       return NextResponse.json(
         { success: false, message: 'Tenant not found' },
@@ -60,7 +61,7 @@ export async function POST(request, { params }) {
     }
 
     // Calculate available balance
-    const [usageRows] = await pool.execute(`
+    const usageRowsResult = await pool.query(`
       SELECT COALESCE(SUM(amount), 0) as used_amount
       FROM deposit_transactions 
       WHERE tenant_id = ? AND transaction_type = ? AND type = 'usage'
@@ -86,13 +87,13 @@ export async function POST(request, { params }) {
       await connection.execute(`
         INSERT INTO deposit_transactions 
         (tenant_id, bill_id, transaction_type, type, amount, used_for, description, transaction_date) 
-        VALUES (?, ?, ?, 'usage', ?, ?, ?, NOW())
+        VALUES ($4, $5, $6, 'usage', $7, $8, $9, NOW() RETURNING id)
       `, [tenantId, billId, transaction_type, amount, used_for, description])
 
       // Create corresponding payment record
       await connection.execute(`
         INSERT INTO payments (bill_id, amount, payment_date, payment_method, notes) 
-        VALUES (?, ?, CURDATE(), ?, ?)
+        VALUES ($10, $11, CURRENT_DATE, $12, $4) RETURNING id
       `, [billId, amount, transaction_type, `${description} - Deposit used for ${used_for}`])
 
       // Check if bill is now fully paid
@@ -117,7 +118,7 @@ export async function POST(request, { params }) {
 
         // Update bill status
         const updateQuery = newStatus === 'paid' 
-          ? 'UPDATE bills SET status = ?, paid_date = CURDATE() WHERE id = ?'
+          ? 'UPDATE bills SET status = $17, paid_date = CURRENT_DATE WHERE id = ?'
           : 'UPDATE bills SET status = ? WHERE id = ?'
         
         const updateParams = newStatus === 'paid' 

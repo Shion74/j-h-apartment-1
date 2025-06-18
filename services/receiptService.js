@@ -21,14 +21,19 @@ const formatDate = (date) => {
 };
 
 // Generate receipt HTML template
-const generateReceiptHTML = (bill, payments) => {
+const generateReceiptHTML = (bill, payments, penaltyPercentage = 1.00) => {
   const totalPaid = payments.reduce((sum, payment) => sum + parseFloat(payment.amount), 0);
   const electricReading = bill.electric_present_reading && bill.electric_previous_reading 
     ? `${bill.electric_previous_reading} → ${bill.electric_present_reading}` 
     : 'N/A';
   
   const electricConsumption = bill.electric_consumption || 0;
+  const electricRate = bill.electric_rate_per_kwh || 11.00; // Default to 11.00 if missing
   const rentAndFees = parseFloat(bill.rent_amount) + parseFloat(bill.extra_fee_amount || 0);
+  
+  // Check if penalty fee was applied
+  const hasPenaltyFee = bill.penalty_applied || bill.penalty_fee_amount > 0;
+  const penaltyFeeAmount = parseFloat(bill.penalty_fee_amount || 0);
 
   return `
     <!DOCTYPE html>
@@ -190,6 +195,10 @@ const generateReceiptHTML = (bill, payments) => {
           padding-top: 10px;
           margin-top: 40px;
         }
+        .penalty-fee {
+          color: #d9534f;
+          font-weight: bold;
+        }
       </style>
     </head>
     <body>
@@ -197,33 +206,34 @@ const generateReceiptHTML = (bill, payments) => {
         <!-- Header -->
         <div class="header">
           <h1>${bill.branch_name || 'J&H APARTMENT'}</h1>
-          <p>${bill.branch_address || 'P3, Patin-ay, Prosperidad, Agusan Del Sur'}</p>
-          <p>Contact: +63 XXX XXX XXXX | Email: official.jhapartment@gmail.com</p>
+          <p>${bill.branch_address || 'Address not available'}</p>
+          <p>Contact: +63 917 123 4567 | Email: admin@jhapartment.com</p>
         </div>
 
+        <!-- Receipt Title -->
         <div class="receipt-title">
-          OFFICIAL PAYMENT RECEIPT
+          OFFICIAL RECEIPT
         </div>
 
-        <!-- Receipt Information -->
+        <!-- Info Section -->
         <div class="info-section">
           <div class="info-box">
-            <h3>Bill Information</h3>
+            <h3>Receipt Information</h3>
             <div class="info-row">
               <span class="info-label">Receipt No:</span>
-              <span class="info-value">RCP-${bill.id}-${Date.now()}</span>
+              <span class="info-value">R-${bill.id}-${Date.now().toString().slice(-6)}</span>
             </div>
             <div class="info-row">
-              <span class="info-label">Bill No:</span>
-              <span class="info-value">BILL-${bill.id}</span>
+              <span class="info-label">Bill Period:</span>
+              <span class="info-value">${formatDate(bill.rent_from)} - ${formatDate(bill.rent_to)}</span>
             </div>
             <div class="info-row">
               <span class="info-label">Bill Date:</span>
               <span class="info-value">${formatDate(bill.bill_date)}</span>
             </div>
             <div class="info-row">
-              <span class="info-label">Billing Period:</span>
-              <span class="info-value">${formatDate(bill.rent_from)} - ${formatDate(bill.rent_to)}</span>
+              <span class="info-label">Bill No:</span>
+              <span class="info-value">${bill.id}</span>
             </div>
           </div>
 
@@ -266,7 +276,7 @@ const generateReceiptHTML = (bill, payments) => {
             </tr>
             <tr>
               <td><strong>Electricity</strong></td>
-              <td>Reading: ${electricReading} (${electricConsumption} kWh) @ ₱${bill.electric_rate_per_kwh}/kWh</td>
+              <td>Reading: ${electricReading} (${electricConsumption} kWh) @ ₱${electricRate}/kWh</td>
               <td class="amount">${formatCurrency(bill.electric_amount || 0)}</td>
             </tr>
             <tr>
@@ -279,6 +289,13 @@ const generateReceiptHTML = (bill, payments) => {
               <td><strong>Extra Fees</strong></td>
               <td>${bill.extra_fee_description || 'Additional charges'}</td>
               <td class="amount">${formatCurrency(bill.extra_fee_amount)}</td>
+            </tr>
+            ` : ''}
+            ${hasPenaltyFee ? `
+            <tr>
+              <td><strong class="penalty-fee">Late Payment Penalty</strong></td>
+              <td class="penalty-fee">${penaltyPercentage}% penalty fee for late payment</td>
+              <td class="amount penalty-fee">${formatCurrency(penaltyFeeAmount)}</td>
             </tr>
             ` : ''}
             <tr style="background: #f8f9fa; font-weight: bold;">
@@ -351,7 +368,7 @@ const generateReceiptHTML = (bill, payments) => {
 };
 
 // Generate PDF receipt
-const generateReceiptPDF = async (bill, payments) => {
+const generateReceiptPDF = async (bill, payments, penaltyPercentage = 1.00) => {
   let browser;
   try {
     browser = await puppeteer.launch({
@@ -360,7 +377,7 @@ const generateReceiptPDF = async (bill, payments) => {
     });
     
     const page = await browser.newPage();
-    const html = generateReceiptHTML(bill, payments);
+    const html = generateReceiptHTML(bill, payments, penaltyPercentage);
     
     await page.setContent(html, { waitUntil: 'networkidle0' });
     
@@ -387,9 +404,9 @@ const generateReceiptPDF = async (bill, payments) => {
 };
 
 // Save receipt to file system
-const saveReceiptToFile = async (bill, payments) => {
+const saveReceiptToFile = async (bill, payments, penaltyPercentage = 1.00) => {
   try {
-    const pdfBuffer = await generateReceiptPDF(bill, payments);
+    const pdfBuffer = await generateReceiptPDF(bill, payments, penaltyPercentage);
     
     // Create receipts directory if it doesn't exist
     const receiptsDir = path.join(__dirname, '../public/receipts');

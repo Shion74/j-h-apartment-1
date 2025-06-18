@@ -133,7 +133,7 @@ CREATE TABLE payments (
   bill_id INT NOT NULL,
   amount DECIMAL(10, 2) NOT NULL,
   payment_date DATE NOT NULL,
-  payment_method ENUM('cash', 'bank_transfer', 'check', 'advance_payment', 'security_deposit', 'other') NOT NULL,
+  payment_method ENUM('cash', 'gcash', 'bank_transfer', 'check', 'advance_payment', 'security_deposit', 'other') NOT NULL,
   notes TEXT,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -144,7 +144,7 @@ CREATE TABLE payments (
 CREATE TABLE email_notifications (
   id INT AUTO_INCREMENT PRIMARY KEY,
   tenant_id INT NULL,
-  email_type ENUM('welcome', 'deposit_receipt', 'contract_expiry', 'contract_renewal', 'bill', 'billing_reminder', 'other') NOT NULL,
+  email_type ENUM('welcome', 'deposit_receipt', 'contract_expiry', 'contract_renewal', 'bill', 'billing_reminder', 'bill_creation_reminder', 'other') NOT NULL,
   email_subject VARCHAR(255) NOT NULL,
   email_body TEXT,
   recipient_email VARCHAR(255) NOT NULL,
@@ -155,17 +155,23 @@ CREATE TABLE email_notifications (
   FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON DELETE CASCADE
 );
 
--- Billing reminders tracking table
+-- Billing reminders tracking table (supports both payment reminders and bill creation reminders)
 CREATE TABLE billing_reminders (
   id INT AUTO_INCREMENT PRIMARY KEY,
-  bill_id INT NOT NULL,
+  bill_id INT NULL COMMENT 'Reference to existing bill (for payment reminders) - NULL for bill creation reminders',
+  tenant_id INT NULL COMMENT 'Tenant ID for bill creation reminders',
+  reminder_type ENUM('payment_reminder', 'bill_creation') DEFAULT 'payment_reminder' COMMENT 'Type of reminder sent',
   reminder_date DATE NOT NULL,
   days_before_due INT NOT NULL COMMENT 'Days before due date when reminder was sent (negative for overdue)',
   email_sent BOOLEAN DEFAULT FALSE,
   email_sent_at TIMESTAMP NULL,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   FOREIGN KEY (bill_id) REFERENCES bills(id) ON DELETE CASCADE,
-  UNIQUE KEY unique_bill_reminder_date (bill_id, reminder_date)
+  FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON DELETE CASCADE,
+  CONSTRAINT unique_bill_payment_reminder UNIQUE (bill_id, reminder_date),
+  CONSTRAINT unique_tenant_creation_reminder UNIQUE (tenant_id, reminder_date, reminder_type),
+  INDEX idx_tenant_id (tenant_id),
+  INDEX idx_reminder_type (reminder_type)
 );
 
 -- Deposit transactions table to track usage

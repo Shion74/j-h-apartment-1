@@ -23,12 +23,21 @@ export default function DashboardPage() {
     totalTenants: 0,
     monthlyRevenue: 0,
     pendingBills: 0,
-    unpaidBills: 0
+    unpaidBills: []
   })
   const [loading, setLoading] = useState(true)
   const [branches, setBranches] = useState([])
-  const [unpaidBills, setUnpaidBills] = useState([])
   const [showBranchModal, setShowBranchModal] = useState(false)
+  const [showPaymentModal, setShowPaymentModal] = useState(false)
+  const [selectedBill, setSelectedBill] = useState(null)
+  const [paymentLoading, setPaymentLoading] = useState(false)
+  const [paymentFormData, setPaymentFormData] = useState({
+    payment_amount: '',
+    payment_method: 'regular',
+    payment_type: 'cash',
+    actual_payment_date: new Date().toISOString().split('T')[0],
+    notes: ''
+  })
   const [branchFormData, setBranchFormData] = useState({
     name: '',
     address: '',
@@ -43,6 +52,7 @@ export default function DashboardPage() {
     lastRun: null,
     stats: []
   })
+  const [penaltyPercentage, setPenaltyPercentage] = useState(1.00) // Will be fetched from settings
 
   useEffect(() => {
     fetchDashboardData()
@@ -60,6 +70,24 @@ export default function DashboardPage() {
         api.getBills()
       ])
 
+      // Fetch penalty percentage from settings
+      try {
+        const ratesResponse = await fetch('/api/settings/billing-rates', {
+          headers: {
+            'Authorization': `Bearer ${localStorage.getItem('token')}`
+          }
+        })
+        
+        if (ratesResponse.ok) {
+          const ratesData = await ratesResponse.json()
+          if (ratesData.success) {
+            setPenaltyPercentage(ratesData.rates.penalty_fee_percentage || 1.00)
+          }
+        }
+      } catch (error) {
+        console.error('Error fetching penalty percentage:', error)
+      }
+
       setStats(statsData.stats)
       setBranches(branchesData.branches || [])
       
@@ -68,7 +96,7 @@ export default function DashboardPage() {
         bill.status === 'unpaid' || bill.status === 'partial' || bill.status === 'overdue'
       ).slice(0, 10) // Show only first 10 for dashboard
       
-      setUnpaidBills(unpaid)
+      setStats(prev => ({ ...prev, unpaidBills: unpaid }))
 
       // Fetch billing reminders data
       await fetchBillingRemindersData()
@@ -141,7 +169,7 @@ export default function DashboardPage() {
       const { api } = await import('../../lib/api')
       await api.createBranchWithRooms(branchFormData)
       
-      toast.success('Branch created successfully with rooms!')
+              toast.success('Branch created')
       setShowBranchModal(false)
       setBranchFormData({
         name: '',
@@ -159,6 +187,190 @@ export default function DashboardPage() {
     } finally {
       setLoading(false)
     }
+  }
+
+  const handlePaymentSubmit = async (e) => {
+    e.preventDefault()
+    setPaymentLoading(true)
+
+    try {
+      const response = await fetch('/api/payments', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${localStorage.getItem('token')}`
+        },
+        body: JSON.stringify({
+          bill_id: selectedBill.id,
+          payment_amount: parseFloat(paymentFormData.payment_amount),
+          payment_method: 'regular',
+          payment_type: paymentFormData.payment_type,
+          actual_payment_date: paymentFormData.actual_payment_date,
+          notes: paymentFormData.notes
+        })
+      })
+
+      const data = await response.json()
+
+      if (data.success) {
+        // Show single consolidated success message
+        let message = '✅ Payment processed'
+        
+        // Add final bill or archiving info
+        if (data.bill_paid && data.is_final_bill && data.tenant_moved_out) {
+          message += ' - tenant moved out and room is now available'
+        } else if (data.bill_paid && data.bill_archived) {
+          message += ' - bill archived'
+        }
+        
+        // If the bill is paid, automatically send a receipt email
+        if (data.bill_paid) {
+          try {
+            const receiptResponse = await fetch('/api/payments/send-receipt', {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${localStorage.getItem('token')}`
+              },
+              body: JSON.stringify({ bill_id: selectedBill.id })
+            })
+            
+            const receiptData = await receiptResponse.json()
+            
+            if (receiptData.success) {
+              // Add receipt info to the success message
+              message += ' and receipt email sent to tenant'
+            } else {
+              console.error('Failed to send receipt email:', receiptData.message)
+              
+              // If the error is because the bill was archived, try with the original bill ID
+              if (receiptData.message && receiptData.message.includes('not found')) {
+                console.log('Attempting to send receipt for archived bill...')
+                
+                // Small delay to ensure archiving is complete
+                await new Promise(resolve => setTimeout(resolve, 1000))
+                
+                const retryResponse = await fetch('/api/payments/send-receipt', {
+                  method: 'POST',
+                  headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': `Bearer ${localStorage.getItem('token')}`
+                  },
+                  body: JSON.stringify({ bill_id: selectedBill.id })
+                })
+                
+                const retryData = await retryResponse.json()
+                
+                if (retryData.success) {
+                  // Add receipt info to the success message after retry
+                  message += ' and receipt email sent to tenant'
+                } else {
+                  console.error('Failed to send receipt on retry:', retryData.message)
+                  message += ' but receipt email failed to send'
+                }
+              } else {
+                message += ' but receipt email failed to send'
+              }
+            }
+          } catch (receiptError) {
+            console.error('Receipt sending error:', receiptError)
+            message += ' but receipt email failed to send'
+          }
+        }
+        
+        toast.success('Payment processed')
+        
+        setShowPaymentModal(false)
+        setPaymentFormData({
+          payment_amount: '',
+          payment_method: 'regular',
+          payment_type: 'cash',
+          actual_payment_date: new Date().toISOString().split('T')[0],
+          notes: ''
+        })
+        fetchDashboardData()
+      } else {
+        toast.error('Error: ' + data.message)
+      }
+    } catch (error) {
+      console.error('Payment error:', error)
+      toast.error('Payment failed')
+    } finally {
+      setPaymentLoading(false)
+    }
+  }
+
+  // Calculate penalty fee for late payments
+  const calculatePenaltyFee = (bill, actualPaymentDate) => {
+    if (!actualPaymentDate || bill.penalty_applied) return 0
+    
+    // Normalize dates to midnight for proper comparison
+    const paymentDate = new Date(actualPaymentDate)
+    paymentDate.setHours(0, 0, 0, 0)
+    
+    // Calculate proper due date based on billing cycle
+    // Due date should be 10 days after the end of the billing period (rent_to)
+    const rentToDate = new Date(bill.rent_to)
+    rentToDate.setHours(0, 0, 0, 0)
+    
+    const dueDate = new Date(rentToDate.getTime() + (10 * 24 * 60 * 60 * 1000)) // 10 days after rent period ends
+    dueDate.setHours(0, 0, 0, 0)
+    
+    // Always use calculated due date based on billing cycle, ignore database due_date
+    // This ensures penalty is always calculated correctly based on rent cycle
+    const finalDueDate = dueDate
+    finalDueDate.setHours(0, 0, 0, 0)
+    
+    if (paymentDate > finalDueDate) {
+      // Use configurable penalty percentage and round to whole number
+      const penaltyAmount = parseFloat(bill.total_amount) * (penaltyPercentage / 100)
+      return Math.round(penaltyAmount)
+    }
+    
+    return 0
+  }
+
+  // Update openPaymentModal to handle penalty fee
+  const openPaymentModal = (bill) => {
+    console.log('Opening payment modal for bill:', bill)
+    setSelectedBill(bill)
+    const paymentAmount = bill.status === 'partial' ? bill.remaining_balance : bill.total_amount
+    setPaymentFormData({
+      payment_amount: paymentAmount.toString(),
+      payment_method: 'regular',
+      payment_type: 'cash',
+      actual_payment_date: new Date().toISOString().split('T')[0],
+      notes: ''
+    })
+    setShowPaymentModal(true)
+  }
+
+  // Auto-update payment amount when penalty fee is calculated
+  useEffect(() => {
+    if (selectedBill && paymentFormData.actual_payment_date) {
+      const penaltyFee = calculatePenaltyFee(selectedBill, paymentFormData.actual_payment_date)
+      const originalAmount = selectedBill.status === 'partial' ? selectedBill.remaining_balance : selectedBill.total_amount
+      const newAmount = parseFloat(originalAmount) + penaltyFee
+      
+      // Only update if the calculated amount is different from current amount
+      if (Math.abs(parseFloat(paymentFormData.payment_amount) - newAmount) > 0.01) {
+        setPaymentFormData(prev => ({
+          ...prev,
+          payment_amount: newAmount.toFixed(2)
+        }))
+      }
+    }
+  }, [selectedBill, paymentFormData.actual_payment_date])
+
+  const formatCurrency = (amount) => {
+    return `₱${parseFloat(amount || 0).toLocaleString('en-PH', { 
+      minimumFractionDigits: 2, 
+      maximumFractionDigits: 2 
+    })}`
+  }
+
+  const formatDate = (date) => {
+    return new Date(date).toLocaleDateString('en-PH')
   }
 
   const statsCards = [
@@ -185,7 +397,7 @@ export default function DashboardPage() {
     },
     {
       title: 'Unpaid Bills',
-      value: stats.unpaidBills,
+      value: stats.pendingBills,
       icon: CurrencyDollarIcon,
       color: 'bg-red-500',
       textColor: 'text-red-600'
@@ -204,7 +416,7 @@ export default function DashboardPage() {
 
   return (
     <DashboardLayout>
-      <Toaster position="top-right" />
+              <Toaster position="top-center" />
       <div className="px-4 sm:px-6 lg:px-8 pb-6">
         {/* Header */}
         <div className="mb-6 pt-6">
@@ -239,13 +451,13 @@ export default function DashboardPage() {
                 <h3 className="text-lg font-semibold text-gray-900">Unpaid Bills</h3>
               </div>
               <span className="text-sm text-gray-500">
-                {stats.unpaidBills} pending
+                {stats.pendingBills} pending
               </span>
             </div>
             
             <div className="space-y-3 max-h-80 overflow-y-auto">
-              {stats.unpaidBills > 0 ? (
-                unpaidBills.map((bill) => (
+              {stats.unpaidBills && stats.unpaidBills.length > 0 ? (
+                stats.unpaidBills.map((bill) => (
                   <div key={bill.id} className="border rounded-lg p-3 hover:bg-gray-50">
                     <div className="flex justify-between items-start">
                       <div className="flex-1">
@@ -253,35 +465,24 @@ export default function DashboardPage() {
                           <p className="text-sm font-medium text-gray-900">
                             {bill.tenant_name} - Room {bill.room_number}
                           </p>
-                          <span className={`ml-2 inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${
-                            bill.status === 'overdue' 
-                              ? 'bg-red-100 text-red-800'
-                              : bill.status === 'partial'
-                              ? 'bg-yellow-100 text-yellow-800'
-                              : 'bg-gray-100 text-gray-800'
-                          }`}>
-                            {bill.status}
-                          </span>
                         </div>
                         <p className="text-xs text-gray-500 mt-1">
-                          {bill.branch_name} • Due: {new Date(bill.rent_to).toLocaleDateString()}
+                          {bill.branch_name} • {new Date(bill.rent_from).toLocaleDateString()} to {new Date(bill.rent_to).toLocaleDateString()}
                         </p>
                       </div>
-                      <div className="text-right ml-4">
-                        <p className="text-sm font-medium text-gray-900">
-                          {bill.status === 'partial' ? (
-                            <span className="text-red-600">
-                              ₱{(bill.remaining_balance || 0).toLocaleString()}
-                            </span>
-                          ) : (
-                            <span>₱{(bill.total_amount || 0).toLocaleString()}</span>
-                          )}
-                        </p>
-                        {bill.status === 'partial' && (
-                          <p className="text-xs text-gray-500">
-                            of ₱{(bill.total_amount || 0).toLocaleString()}
+                      <div className="flex items-center space-x-4">
+                        <div className="text-right">
+                          <p className="text-sm font-medium text-gray-900">
+                            ₱{(bill.total_amount || 0).toLocaleString()}
                           </p>
-                        )}
+                        </div>
+                        <button 
+                          onClick={() => openPaymentModal(bill)}
+                          className="px-3 py-1 bg-blue-600 text-white text-xs rounded hover:bg-blue-700"
+                          title="Process Payment"
+                        >
+                          Pay
+                        </button>
                       </div>
                     </div>
                   </div>
@@ -295,17 +496,213 @@ export default function DashboardPage() {
               )}
             </div>
             
-            {stats.unpaidBills > 0 && (
+            {stats.unpaidBills && stats.unpaidBills.length > 0 && (
               <div className="mt-4 pt-4 border-t">
-                <button
-                  onClick={() => window.location.href = '/billing'}
+                <Link
+                  href="/billing"
                   className="w-full inline-flex justify-center items-center px-3 py-2 border border-transparent text-sm leading-4 font-medium rounded-md text-blue-600 bg-blue-50 hover:bg-blue-100"
                 >
                   View All Bills
-                </button>
+                </Link>
               </div>
             )}
           </div>
+
+          {/* Payment Modal */}
+          {showPaymentModal && selectedBill && (
+            <div className="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50">
+              <div className="relative top-20 mx-auto p-5 border max-w-2xl shadow-lg rounded-md bg-white">
+                <div className="flex justify-between items-center mb-4">
+                  <h3 className="text-lg font-bold text-gray-900">
+                    Process Payment - {selectedBill.tenant_name} (Room {selectedBill.room_number})
+                  </h3>
+                  <button
+                    onClick={() => setShowPaymentModal(false)}
+                    className="text-gray-400 hover:text-gray-600"
+                  >
+                    <span className="sr-only">Close</span>
+                    <svg className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                    </svg>
+                  </button>
+                </div>
+
+                {/* Bill Summary */}
+                <div className="bg-gray-50 p-4 rounded-lg mb-6">
+                  <h4 className="font-medium text-gray-900 mb-2">Bill Summary</h4>
+                  <div className="grid grid-cols-2 gap-4 text-sm">
+                    <div>
+                      <span className="text-gray-500">Period:</span>
+                      <span className="ml-2">{formatDate(selectedBill.rent_from)} - {formatDate(selectedBill.rent_to)}</span>
+                    </div>
+                    <div>
+                      <span className="text-gray-500">Total Amount:</span>
+                      <span className="ml-2 font-medium">{formatCurrency(selectedBill.total_amount)}</span>
+                    </div>
+                    {selectedBill.status === 'partial' && (
+                      <>
+                        <div>
+                          <span className="text-gray-500">Total Paid:</span>
+                          <span className="ml-2 font-medium text-green-600">{formatCurrency(selectedBill.total_paid)}</span>
+                        </div>
+                        <div>
+                          <span className="text-gray-500">Remaining:</span>
+                          <span className="ml-2 font-medium text-red-600">{formatCurrency(selectedBill.remaining_balance)}</span>
+                        </div>
+                      </>
+                    )}
+                    <div>
+                      <span className="text-gray-500">Due Date:</span>
+                      <span className="ml-2">{selectedBill.due_date ? formatDate(selectedBill.due_date) : 'Not set'}</span>
+                    </div>
+                    <div>
+                      <span className="text-gray-500">Status:</span>
+                      <span className={`ml-2 px-2 py-1 rounded text-xs ${
+                        selectedBill.status === 'paid' ? 'bg-green-100 text-green-800' :
+                        selectedBill.status === 'partial' ? 'bg-yellow-100 text-yellow-800' :
+                        selectedBill.is_overdue ? 'bg-red-100 text-red-800' :
+                        'bg-orange-100 text-orange-800'
+                      }`}>
+                        {selectedBill.is_overdue ? 'Overdue' : selectedBill.status}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+
+                <form onSubmit={handlePaymentSubmit} className="space-y-4">
+                  {/* Payment Amount */}
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                      Payment Amount *
+                    </label>
+                    <input
+                      type="number"
+                      step="0.01"
+                      value={paymentFormData.payment_amount}
+                      onChange={(e) => {
+                        const inputAmount = parseFloat(e.target.value)
+                        const penaltyFee = calculatePenaltyFee(selectedBill, paymentFormData.actual_payment_date)
+                        const baseAmount = selectedBill.status === 'partial' ? selectedBill.remaining_balance : selectedBill.total_amount
+                        const maxAmount = parseFloat(baseAmount) + penaltyFee
+                        
+                        // Check if this is a refund bill (negative amounts)
+                        const isRefundBill = selectedBill.is_refund_bill || parseFloat(selectedBill.total_amount) < 0
+                        
+                        if (isRefundBill) {
+                          // For refund bills, validate absolute values
+                          const maxRefundAmount = Math.abs(maxAmount)
+                          const inputRefundAmount = Math.abs(inputAmount)
+                          
+                          if (inputRefundAmount > (maxRefundAmount + 0.01)) {
+                            toast.error('Refund amount exceeded')
+                            return
+                          }
+                        } else {
+                          // For regular bills, use original validation
+                          if (inputAmount > (maxAmount + 0.01)) {
+                            toast.error('Payment amount exceeded')
+                            return
+                          }
+                        }
+                        
+                        setPaymentFormData(prev => ({...prev, payment_amount: e.target.value}))
+                      }}
+                      className="block w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-blue-500 focus:border-blue-500"
+                      placeholder="Enter payment amount"
+                      required
+                    />
+                    <p className="text-xs text-gray-500 mt-1">
+                      {(() => {
+                        const penaltyFee = calculatePenaltyFee(selectedBill, paymentFormData.actual_payment_date)
+                        const baseAmount = selectedBill.status === 'partial' ? selectedBill.remaining_balance : selectedBill.total_amount
+                        const totalWithPenalty = parseFloat(baseAmount) + penaltyFee
+                        
+                        if (penaltyFee > 0) {
+                          return `Total with penalty: ${formatCurrency(totalWithPenalty)}`
+                        } else {
+                          return selectedBill.status === 'partial'
+                            ? `Remaining balance: ${formatCurrency(selectedBill.remaining_balance)}`
+                            : `Full amount: ${formatCurrency(selectedBill.total_amount)}`
+                        }
+                      })()}
+                    </p>
+                  </div>
+
+                  {/* Payment Type */}
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                      Payment Type *
+                    </label>
+                    <select
+                      value={paymentFormData.payment_type}
+                      onChange={(e) => setPaymentFormData(prev => ({...prev, payment_type: e.target.value}))}
+                      className="block w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-blue-500 focus:border-blue-500"
+                      required
+                    >
+                      <option value="cash">Cash</option>
+                      <option value="gcash">GCash</option>
+                      <option value="bank">Bank Transfer</option>
+                      <option value="check">Check</option>
+                      <option value="other">Other</option>
+                    </select>
+                  </div>
+
+                  {/* Actual Payment Date */}
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                      Actual Payment Date *
+                    </label>
+                    <input
+                      type="date"
+                      value={paymentFormData.actual_payment_date}
+                      onChange={(e) => setPaymentFormData(prev => ({...prev, actual_payment_date: e.target.value}))}
+                      className="block w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-blue-500 focus:border-blue-500"
+                      required
+                    />
+                    <p className="text-xs text-gray-500 mt-1">
+                      Date when tenant actually made the payment. Late payments (more than 10 days after billing period ends) will incur a 1% penalty fee.
+                    </p>
+                  </div>
+
+                  {/* Notes */}
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                      Notes (Optional)
+                    </label>
+                    <textarea
+                      value={paymentFormData.notes}
+                      onChange={(e) => setPaymentFormData(prev => ({...prev, notes: e.target.value}))}
+                      className="block w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-blue-500 focus:border-blue-500"
+                      rows="3"
+                      placeholder="Add any payment notes..."
+                    />
+                  </div>
+
+                  {/* Action Buttons */}
+                  <div className="flex justify-end space-x-3 pt-4">
+                    <button
+                      type="button"
+                      onClick={() => setShowPaymentModal(false)}
+                      className="px-4 py-2 border border-gray-300 rounded-md text-sm font-medium text-gray-700 hover:bg-gray-50"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="submit"
+                      disabled={paymentLoading}
+                      className={`px-4 py-2 text-white text-sm font-medium rounded-md disabled:opacity-50 ${
+                        selectedBill.is_final_bill 
+                          ? 'bg-green-600 hover:bg-green-700' 
+                          : 'bg-blue-600 hover:bg-blue-700'
+                      }`}
+                    >
+                      {paymentLoading ? 'Processing...' : selectedBill.is_final_bill ? 'Complete Final Payment' : 'Process Payment'}
+                    </button>
+                  </div>
+                </form>
+              </div>
+            </div>
+          )}
 
           {/* Branches Overview */}
           <div className="bg-white rounded-lg shadow-sm p-6">
@@ -542,7 +939,7 @@ export default function DashboardPage() {
                     onChange={(e) => setBranchFormData(prev => ({ ...prev, electricity_rate: e.target.value }))}
                     required
                     className="mt-1 block w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-blue-500 focus:border-blue-500"
-                    placeholder="12"
+                    placeholder="11"
                   />
                 </div>
               </div>

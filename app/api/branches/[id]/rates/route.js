@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server'
 import { requireAuth } from '../../../../../lib/auth'
 
-const Branch = require('../../../../../models/branch')
+import Branch from '../../../../../models/branch.js'
 
 export async function PUT(request, { params }) {
   try {

@@ -62,10 +62,10 @@ export default function RoomsPage() {
       
       if (editingRoom) {
         await api.updateRoom(editingRoom.id, formData)
-        toast.success('Room updated successfully')
+        toast.success('Room updated')
       } else {
         await api.createRoom(formData)
-        toast.success('Room created successfully')
+        toast.success('Room created')
       }
       
       setShowModal(false)
@@ -97,7 +97,7 @@ export default function RoomsPage() {
     try {
       const { api } = await import('../../lib/api')
       await api.deleteRoom(room.id)
-      toast.success('Room deleted successfully')
+              toast.success('Room deleted')
       fetchData()
     } catch (error) {
       console.error('Error deleting room:', error)
@@ -156,7 +156,7 @@ export default function RoomsPage() {
 
   return (
     <>
-      <Toaster position="top-right" />
+              <Toaster position="top-center" />
       <DashboardLayout>
         <div className="px-4 sm:px-6 lg:px-8 pb-6">
           {/* Header */}

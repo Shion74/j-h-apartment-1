@@ -257,11 +257,15 @@ const testEmailConfig = async () => {
 };
 
 // Send receipt to tenant via email
-const sendReceiptToTenant = async (bill, payments, recipientEmail, pdfBuffer) => {
+const sendReceiptToTenant = async (bill, payments, recipientEmail, pdfBuffer, penaltyPercentage = 1.00) => {
   try {
     const transporter = createTransporter();
     
     const subject = `Payment Receipt - Room ${bill.room_number} - ${formatDate(new Date())}`;
+    
+    // Check if penalty fee was applied
+    const hasPenaltyFee = bill.penalty_applied || bill.penalty_fee_amount > 0;
+    const penaltyFeeAmount = parseFloat(bill.penalty_fee_amount || 0);
     
     let textMessage = `
 Dear ${bill.tenant_name},
@@ -274,6 +278,7 @@ Receipt Details:
 - Amount Paid: ${formatCurrency(payments.reduce((sum, p) => sum + parseFloat(p.amount), 0))}
 - Payment Date: ${formatDate(payments[payments.length - 1].actual_payment_date || payments[payments.length - 1].payment_date)}
 - Status: FULLY PAID
+${hasPenaltyFee ? `- Late Payment Fee: ${formatCurrency(penaltyFeeAmount)} (${penaltyPercentage}% penalty applied)` : ''}
 
 This receipt serves as official proof of payment.
 
@@ -1347,6 +1352,389 @@ Generated on: ${formatDate(new Date())} at ${new Date().toLocaleTimeString()}
   }
 };
 
+// Generate HTML for final bill template with deposit information
+const generateFinalBillHTML = (bill) => {
+  const electricReading = bill.electric_present_reading && bill.electric_previous_reading 
+    ? `${bill.electric_previous_reading} → ${bill.electric_present_reading}` 
+    : 'N/A';
+  
+  const electricConsumption = bill.electric_consumption || 0;
+  
+  // Get deposit information if available
+  const depositApplied = parseFloat(bill.deposit_applied || 0);
+  const originalBillAmount = parseFloat(bill.original_bill_amount || bill.total_amount);
+  const hasDepositApplied = depositApplied > 0;
+  
+  return `
+    <!DOCTYPE html>
+    <html>
+    <head>
+      <meta charset="utf-8">
+      <style>
+        body { font-family: Arial, sans-serif; margin: 0; padding: 20px; background-color: #f4f4f4; }
+        .bill-container { max-width: 600px; margin: 0 auto; background: white; border-radius: 8px; overflow: hidden; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+        .header { background: linear-gradient(135deg, #e53935 0%, #8e24aa 100%); color: white; padding: 30px; text-align: center; }
+        .header h1 { margin: 0; font-size: 28px; }
+        .header p { margin: 5px 0 0 0; opacity: 0.9; }
+        .final-bill-badge { background: #ff5252; color: white; padding: 5px 10px; border-radius: 4px; font-size: 14px; margin-top: 10px; display: inline-block; }
+        .content { padding: 30px; }
+        .bill-info { background: #f8f9fa; padding: 20px; border-radius: 8px; margin-bottom: 25px; }
+        .bill-info h3 { margin: 0 0 15px 0; color: #333; }
+        .info-row { display: flex; justify-content: space-between; margin-bottom: 10px; }
+        .info-label { font-weight: bold; color: #666; }
+        .info-value { color: #333; }
+        .charges-section { margin-bottom: 25px; }
+        .charges-section h3 { border-bottom: 2px solid #e53935; padding-bottom: 10px; margin-bottom: 20px; color: #333; }
+        .charge-item { display: flex; justify-content: space-between; padding: 15px; margin-bottom: 10px; border-radius: 6px; }
+        .charge-rent { background: #e3f2fd; border-left: 4px solid #2196f3; }
+        .charge-electric { background: #fff3e0; border-left: 4px solid #ff9800; }
+        .charge-water { background: #e8f5e8; border-left: 4px solid #4caf50; }
+        .deposit-section { background: #e8eaf6; padding: 20px; border-radius: 8px; margin-bottom: 25px; border-left: 4px solid #3f51b5; }
+        .deposit-row { display: flex; justify-content: space-between; margin-bottom: 10px; }
+        .total-section { background: linear-gradient(135deg, #e53935 0%, #8e24aa 100%); color: white; padding: 20px; border-radius: 8px; text-align: center; }
+        .total-amount { font-size: 32px; font-weight: bold; margin: 10px 0; }
+        .footer { padding: 20px; text-align: center; color: #666; border-top: 1px solid #eee; }
+        .payment-note { background: #ffebee; border: 1px solid #ffcdd2; padding: 15px; border-radius: 6px; margin: 20px 0; }
+      </style>
+    </head>
+    <body>
+      <div class="bill-container">
+        <!-- Header -->
+        <div class="header">
+          <h1>${bill.branch_name || 'JH APARTMENT'}</h1>
+          <p>${bill.branch_address || 'Patin-ay, Prosperidad, Agusan del Sur'}</p>
+          <div class="final-bill-badge">FINAL BILL</div>
+        </div>
+
+        <!-- Content -->
+        <div class="content">
+          <!-- Bill Information -->
+          <div class="bill-info">
+            <h3>Final Bill Information</h3>
+            <div class="info-row">
+              <span class="info-label">Tenant Name:</span>
+              <span class="info-value">${bill.tenant_name}</span>
+            </div>
+            <div class="info-row">
+              <span class="info-label">Room Number:</span>
+              <span class="info-value">${bill.room_number}</span>
+            </div>
+            <div class="info-row">
+              <span class="info-label">Final Bill Period:</span>
+              <span class="info-value">${formatDate(bill.rent_from)} - ${formatDate(bill.rent_to)}</span>
+            </div>
+            <div class="info-row">
+              <span class="info-label">Bill Date:</span>
+              <span class="info-value">${formatDate(bill.bill_date)}</span>
+            </div>
+            <div class="info-row">
+              <span class="info-label">Due Date:</span>
+              <span class="info-value">${formatDate(bill.rent_to)}</span>
+            </div>
+          </div>
+
+          <!-- Charges Breakdown -->
+          <div class="charges-section">
+            <h3>Charges Breakdown</h3>
+            
+            <!-- Rent -->
+            <div class="charge-item charge-rent">
+              <div>
+                <strong>Prorated Rent</strong>
+                <br><small>Period: ${formatDate(bill.rent_from)} - ${formatDate(bill.rent_to)}</small>
+              </div>
+              <div style="text-align: right;">
+                <strong>${formatCurrency(bill.rent_amount)}</strong>
+              </div>
+            </div>
+
+            <!-- Electric -->
+            <div class="charge-item charge-electric">
+              <div>
+                <strong>Electricity</strong>
+                <br><small>Reading: ${electricReading} (${electricConsumption} kWh)</small>
+                <br><small>Rate: ₱${bill.electric_rate_per_kwh}/kWh</small>
+              </div>
+              <div style="text-align: right;">
+                <strong>${formatCurrency(bill.electric_amount || 0)}</strong>
+              </div>
+            </div>
+
+            <!-- Water -->
+            <div class="charge-item charge-water">
+              <div>
+                <strong>Water</strong>
+                <br><small>Fixed charge</small>
+              </div>
+              <div style="text-align: right;">
+                <strong>${formatCurrency(bill.water_amount)}</strong>
+              </div>
+            </div>
+
+            ${bill.extra_fee_amount > 0 ? `
+            <!-- Extra Fees -->
+            <div class="charge-item" style="background: #f3e5f5; border-left: 4px solid #9c27b0;">
+              <div>
+                <strong>Extra Fees</strong>
+                <br><small>${bill.extra_fee_description || 'Additional charges'}</small>
+              </div>
+              <div style="text-align: right;">
+                <strong>${formatCurrency(bill.extra_fee_amount)}</strong>
+              </div>
+            </div>
+            ` : ''}
+          </div>
+
+          ${hasDepositApplied ? `
+          <!-- Deposit Applied Section -->
+          <div class="deposit-section">
+            <h3>Deposit Applied</h3>
+            <div class="deposit-row">
+              <span class="info-label">Original Bill Amount:</span>
+              <span class="info-value">${formatCurrency(originalBillAmount)}</span>
+            </div>
+            <div class="deposit-row">
+              <span class="info-label">Deposit Applied:</span>
+              <span class="info-value">- ${formatCurrency(depositApplied)}</span>
+            </div>
+            <div class="deposit-row" style="border-top: 1px solid #ccc; padding-top: 10px; font-weight: bold;">
+              <span class="info-label">Remaining Balance Due:</span>
+              <span class="info-value">${formatCurrency(bill.total_amount)}</span>
+            </div>
+          </div>
+          ` : ''}
+
+          <!-- Total -->
+          <div class="total-section">
+            <div>Total Amount Due</div>
+            <div class="total-amount">${formatCurrency(bill.total_amount)}</div>
+            <div>Status: ${(bill.status || 'PENDING').toUpperCase()}</div>
+          </div>
+
+          <!-- Payment Note -->
+          <div class="payment-note">
+            <strong>IMPORTANT: Final Bill Payment</strong><br>
+            This is your FINAL BILL for your tenancy. Please settle this amount to complete your move-out process.
+            Your room will only be officially vacated and your contract terminated after this bill is paid in full.
+            ${hasDepositApplied ? `Your security deposit of ${formatCurrency(depositApplied)} has been applied to reduce the original bill amount.` : ''}
+          </div>
+        </div>
+
+        <!-- Footer -->
+        <div class="footer">
+          <p>This is an automatically generated final bill. For questions or concerns, please contact the management office.</p>
+          <p><strong>Generated on:</strong> ${formatDate(new Date())}</p>
+        </div>
+      </div>
+    </body>
+    </html>
+  `;
+};
+
+// Send final bill to tenant via email
+const sendFinalBillToTenant = async (bill, recipientEmail) => {
+  try {
+    const transporter = createTransporter();
+    
+    // Determine if deposit was applied
+    const depositApplied = parseFloat(bill.deposit_applied || 0);
+    const hasDepositApplied = depositApplied > 0;
+    
+    const subject = `FINAL BILL - Room ${bill.room_number} - Move Out`;
+    const htmlContent = generateFinalBillHTML(bill);
+    
+    let textMessage = `
+Dear ${bill.tenant_name},
+
+This is your FINAL BILL for Room ${bill.room_number} at ${bill.branch_name || 'JH APARTMENT'}.
+
+Final Bill Period: ${formatDate(bill.rent_from)} - ${formatDate(bill.rent_to)}
+Bill Date: ${formatDate(bill.bill_date)}
+Due Date: ${formatDate(bill.rent_to)}
+
+CHARGES BREAKDOWN:
+- Prorated Rent: ${formatCurrency(bill.rent_amount)}
+- Electricity: ${formatCurrency(bill.electric_amount || 0)}
+- Water: ${formatCurrency(bill.water_amount)}
+${bill.extra_fee_amount > 0 ? `- Extra Fees (${bill.extra_fee_description || 'Additional charges'}): ${formatCurrency(bill.extra_fee_amount)}\n` : ''}
+
+${hasDepositApplied ? `
+DEPOSIT APPLIED:
+- Original Bill Amount: ${formatCurrency(parseFloat(bill.original_bill_amount || bill.total_amount))}
+- Deposit Applied: - ${formatCurrency(depositApplied)}
+- Remaining Balance Due: ${formatCurrency(bill.total_amount)}
+` : ''}
+
+TOTAL AMOUNT DUE: ${formatCurrency(bill.total_amount)}
+
+IMPORTANT: This is your FINAL BILL. Please settle this amount to complete your move-out process.
+Your room will only be officially vacated and your contract terminated after this bill is paid in full.
+${hasDepositApplied ? `Your security deposit of ${formatCurrency(depositApplied)} has been applied to reduce the original bill amount.` : ''}
+
+For questions or concerns, please contact the management office.
+
+Thank you for choosing ${bill.branch_name || 'JH APARTMENT'}.
+`;
+
+    const mailOptions = {
+      from: process.env.EMAIL_USER || 'official.jhapartment@gmail.com',
+      to: recipientEmail,
+      subject: subject,
+      text: textMessage,
+      html: htmlContent
+    };
+
+    await transporter.sendMail(mailOptions);
+    console.log(`✅ Final bill email sent to ${recipientEmail}`);
+    return true;
+  } catch (error) {
+    console.error('Error sending final bill email:', error);
+    return false;
+  }
+};
+
+// Send refund notification email to tenant
+const sendRefundNotificationEmail = async (bill, recipientEmail, refundAmount) => {
+  try {
+    const transporter = createTransporter();
+    
+    const subject = `💰 Refund Due - Room ${bill.room_number} - Move Out`;
+    
+    const htmlContent = `
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <meta charset="utf-8">
+        <style>
+          body { font-family: Arial, sans-serif; margin: 0; padding: 20px; background-color: #f4f4f4; }
+          .email-container { max-width: 600px; margin: 0 auto; background: white; border-radius: 8px; overflow: hidden; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+          .header { background: linear-gradient(135deg, #28a745 0%, #20c997 100%); color: white; padding: 30px; text-align: center; }
+          .content { padding: 30px; }
+          .refund-info { background: #e8f5e8; border-left: 4px solid #28a745; padding: 20px; margin: 20px 0; border-radius: 8px; }
+          .bill-info { background: #f8f9fa; padding: 20px; margin: 20px 0; border-radius: 8px; }
+          .amount-box { background: #d4edda; border: 2px solid #28a745; padding: 20px; border-radius: 8px; text-align: center; margin: 20px 0; }
+          .footer { padding: 20px; text-align: center; color: #666; border-top: 1px solid #eee; }
+        </style>
+      </head>
+      <body>
+        <div class="email-container">
+          <div class="header">
+            <h1>💰 Great News! Refund Available</h1>
+            <p>Your Move-Out Process - Refund Due</p>
+          </div>
+          
+          <div class="content">
+            <div class="refund-info">
+              <h3>Dear ${bill.tenant_name},</h3>
+              <p>Excellent news! After covering all your bills, you have a refund due from your deposits.</p>
+            </div>
+            
+            <div class="amount-box">
+              <h3>💰 Refund Amount</h3>
+              <h2 style="color: #28a745; font-size: 32px; margin: 10px 0;">₱${refundAmount.toFixed(2)}</h2>
+              <p>This amount will be processed and returned to you</p>
+            </div>
+            
+            <div class="bill-info">
+              <h3>📋 Bill Summary</h3>
+              <p><strong>Room:</strong> ${bill.room_number}</p>
+              <p><strong>Final Bill Period:</strong> ${formatDate(bill.rent_from)} - ${formatDate(bill.rent_to)}</p>
+              <p><strong>Total Bills Covered:</strong> ₱${bill.total_amount.toFixed(2)}</p>
+              <p><strong>Your Deposits Applied:</strong> ₱${(bill.total_amount + refundAmount).toFixed(2)}</p>
+              <p><strong>Refund Due:</strong> <span style="color: #28a745; font-weight: bold;">₱${refundAmount.toFixed(2)}</span></p>
+            </div>
+            
+            <div style="background: #fff3cd; border: 1px solid #ffeaa7; padding: 15px; border-radius: 6px; margin: 20px 0;">
+              <h4>📋 What Happens Next?</h4>
+              <ol>
+                <li>Your bills have been automatically covered by your deposits</li>
+                <li>The admin will process your refund</li>
+                <li>You will be contacted for refund collection details</li>
+                <li>Your move-out will be completed once the refund is processed</li>
+              </ol>
+            </div>
+            
+            <div style="background: #d1ecf1; border: 1px solid #bee5eb; padding: 15px; border-radius: 6px; margin: 20px 0;">
+              <h4>💡 Important Information</h4>
+              <p>• No action required from you at this time</p>
+              <p>• Your room contract is being processed for termination</p>
+              <p>• Please wait for admin contact regarding refund collection</p>
+              <p>• Keep this email for your records</p>
+            </div>
+            
+            <div style="text-align: center; margin: 30px 0;">
+              <p style="font-size: 18px; color: #28a745;"><strong>Thank you for being a valued tenant! 🏡</strong></p>
+            </div>
+          </div>
+          
+          <div class="footer">
+            <p>This is an automated refund notification</p>
+            <p>For questions, please contact: official.jhapartment@gmail.com</p>
+            <p>J&H Apartment Management Team</p>
+          </div>
+        </div>
+      </body>
+      </html>
+    `;
+    
+    const textContent = `
+Dear ${bill.tenant_name},
+
+REFUND NOTIFICATION - MOVE OUT
+
+Great news! After covering all your bills, you have a refund due from your deposits.
+
+REFUND AMOUNT: ₱${refundAmount.toFixed(2)}
+
+Bill Summary:
+- Room: ${bill.room_number}
+- Final Bill Period: ${formatDate(bill.rent_from)} - ${formatDate(bill.rent_to)}
+- Total Bills Covered: ₱${bill.total_amount.toFixed(2)}
+- Your Deposits Applied: ₱${(bill.total_amount + refundAmount).toFixed(2)}
+- Refund Due: ₱${refundAmount.toFixed(2)}
+
+What Happens Next:
+1. Your bills have been automatically covered by your deposits
+2. The admin will process your refund
+3. You will be contacted for refund collection details
+4. Your move-out will be completed once the refund is processed
+
+Important Information:
+• No action required from you at this time
+• Your room contract is being processed for termination
+• Please wait for admin contact regarding refund collection
+• Keep this email for your records
+
+Thank you for being a valued tenant!
+
+Best regards,
+J&H Apartment Management Team
+    `;
+
+    const mailOptions = {
+      from: process.env.EMAIL_USER || 'official.jhapartment@gmail.com',
+      to: recipientEmail,
+      subject: subject,
+      text: textContent,
+      html: htmlContent
+    };
+
+    const result = await transporter.sendMail(mailOptions);
+    
+    return {
+      success: true,
+      messageId: result.messageId,
+      message: 'Refund notification email sent successfully'
+    };
+  } catch (error) {
+    console.error('Refund notification email sending error:', error);
+    return {
+      success: false,
+      error: error.message
+    };
+  }
+};
+
 export default {
   sendBillToTenant,
   sendReceiptToTenant,
@@ -1357,5 +1745,7 @@ export default {
   sendContractExpiryNotification,
   sendDepartureEmail,
   sendMonthlyReport,
-  sendBillingReminderToManagement
+  sendBillingReminderToManagement,
+  sendFinalBillToTenant,
+  sendRefundNotificationEmail
 }; 

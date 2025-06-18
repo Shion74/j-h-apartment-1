@@ -14,17 +14,20 @@ export async function GET(request) {
     }
 
     // Get billing-related settings
-    const [settings] = await pool.execute(`
+    const settingsResult = await pool.query(`
       SELECT setting_key, setting_value 
-      FROM system_settings 
-      WHERE setting_key IN ('electric_rate_per_kwh', 'water_fixed_amount', 'default_room_rate')
+      FROM settings 
+      WHERE setting_key IN ('electric_rate_per_kwh', 'water_fixed_amount', 'default_room_rate', 'penalty_fee_percentage')
     `)
+    
+    const settings = settingsResult.rows
 
     // Default values if not found in database
     const defaultRates = {
-      electric_rate_per_kwh: 12.00,
+      electric_rate_per_kwh: 11.00,
       water_fixed_amount: 200.00,
-      default_room_rate: 3500.00
+      default_room_rate: 3500.00,
+      penalty_fee_percentage: 1.00
     }
 
     const rates = { ...defaultRates }
@@ -60,11 +63,11 @@ export async function PUT(request) {
     const rates = await request.json()
 
     // Validate rates
-    const validKeys = ['electric_rate_per_kwh', 'water_fixed_amount', 'default_room_rate']
+    const validKeys = ['electric_rate_per_kwh', 'water_fixed_amount', 'default_room_rate', 'penalty_fee_percentage']
     const updates = []
 
     for (const [key, value] of Object.entries(rates)) {
-      if (validKeys.includes(key) && typeof value === 'number' && value > 0) {
+      if (validKeys.includes(key) && typeof value === 'number' && value >= 0) {
         updates.push([key, value.toString(), 'number'])
       }
     }
@@ -77,21 +80,17 @@ export async function PUT(request) {
     }
 
     // Update settings in database
-    const connection = await pool.getConnection()
-    await connection.beginTransaction()
-
     try {
       for (const [key, value, type] of updates) {
-        await connection.execute(`
-          INSERT INTO system_settings (setting_key, setting_value, setting_type) 
-          VALUES (?, ?, ?)
-          ON DUPLICATE KEY UPDATE 
-          setting_value = VALUES(setting_value),
-          updated_at = CURRENT_TIMESTAMP
-        `, [key, value, type])
+        await pool.query(`
+          INSERT INTO settings (setting_key, setting_value, description) 
+          VALUES ($1, $2, $3)
+          ON CONFLICT (setting_key) 
+          DO UPDATE SET 
+            setting_value = EXCLUDED.setting_value,
+            updated_at = CURRENT_TIMESTAMP
+        `, [key, value, `${key.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())} setting`])
       }
-
-      await connection.commit()
 
       return NextResponse.json({
         success: true,
@@ -99,10 +98,7 @@ export async function PUT(request) {
       })
 
     } catch (error) {
-      await connection.rollback()
       throw error
-    } finally {
-      connection.release()
     }
 
   } catch (error) {

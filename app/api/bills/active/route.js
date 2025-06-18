@@ -14,7 +14,7 @@ export async function GET(request) {
     }
 
     // Get all active bills (unpaid or partial)
-    const [bills] = await pool.execute(`
+    const billsResult = await pool.query(`
       SELECT 
         b.*,
         t.name as tenant_name,
@@ -25,6 +25,7 @@ export async function GET(request) {
       JOIN rooms r ON b.room_id = r.id
       LEFT JOIN branches br ON r.branch_id = br.id
       WHERE b.status IN ('unpaid', 'partial')
+    const bills = billsResult.rows
       ORDER BY b.bill_date DESC
     `)
 

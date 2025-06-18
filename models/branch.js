@@ -1,10 +1,10 @@
-const { pool } = require('../config/database');
+import { pool } from '../lib/database.js';
 
 class Branch {
   // Get all branches
   static async findAll() {
     try {
-      const [rows] = await pool.execute(`
+      const result = await pool.query(`
         SELECT b.*, 
                COUNT(r.id) as room_count,
                COUNT(CASE WHEN r.status = 'occupied' THEN 1 END) as occupied_rooms,
@@ -17,7 +17,7 @@ class Branch {
         GROUP BY b.id
         ORDER BY b.name
       `);
-      return rows;
+      return result.rows;
     } catch (error) {
       console.error('Error finding all branches:', error);
       throw error;
@@ -27,7 +27,7 @@ class Branch {
   // Get branch by ID
   static async findById(id) {
     try {
-      const [rows] = await pool.execute(`
+      const result = await pool.query(`
         SELECT b.*, 
                COUNT(r.id) as room_count,
                COUNT(CASE WHEN r.status = 'occupied' THEN 1 END) as occupied_rooms,
@@ -35,11 +35,11 @@ class Branch {
                COUNT(CASE WHEN r.status = 'maintenance' THEN 1 END) as maintenance_rooms
         FROM branches b
         LEFT JOIN rooms r ON b.id = r.branch_id
-        WHERE b.id = ?
+        WHERE b.id = $1
         GROUP BY b.id
       `, [id]);
       
-      return rows.length ? rows[0] : null;
+      return result.rows.length ? result.rows[0] : null;
     } catch (error) {
       console.error('Error finding branch by ID:', error);
       throw error;
@@ -54,17 +54,17 @@ class Branch {
       if (!branch) return null;
 
       // Get rooms for this branch
-      const [rooms] = await pool.execute(`
+      const result = await pool.query(`
         SELECT r.*, t.id as tenant_id, t.name as tenant_name 
         FROM rooms r
         LEFT JOIN tenants t ON r.id = t.room_id
-        WHERE r.branch_id = ?
+        WHERE r.branch_id = $1
         ORDER BY r.room_number
       `, [id]);
 
       return {
         ...branch,
-        rooms
+        rooms: result.rows
       };
     } catch (error) {
       console.error('Error finding branch with rooms:', error);
@@ -84,13 +84,13 @@ class Branch {
     } = branchData;
     
     try {
-      const [result] = await pool.execute(
-        'INSERT INTO branches (name, description, address, monthly_rent, water_rate, electricity_rate) VALUES (?, ?, ?, ?, ?, ?)',
+      const result = await pool.query(
+        'INSERT INTO branches (name, description, address, monthly_rent, water_rate, electricity_rate) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id',
         [name, description || null, address || null, monthly_rent, water_rate, electricity_rate]
       );
       
       return {
-        id: result.insertId,
+        id: result.rows[0].id,
         ...branchData,
         monthly_rent,
         water_rate,
@@ -107,8 +107,8 @@ class Branch {
     const { name, description, address, monthly_rent, water_rate, electricity_rate } = branchData;
     
     try {
-      await pool.execute(
-        'UPDATE branches SET name = ?, description = ?, address = ?, monthly_rent = ?, water_rate = ?, electricity_rate = ? WHERE id = ?',
+      await pool.query(
+        'UPDATE branches SET name = $1, description = $2, address = $3, monthly_rent = $4, water_rate = $5, electricity_rate = $6 WHERE id = $7',
         [name, description || null, address || null, monthly_rent, water_rate, electricity_rate, id]
       );
       
@@ -124,8 +124,8 @@ class Branch {
     const { monthly_rent, water_rate, electricity_rate } = rates;
     
     try {
-      await pool.execute(
-        'UPDATE branches SET monthly_rent = ?, water_rate = ?, electricity_rate = ? WHERE id = ?',
+      await pool.query(
+        'UPDATE branches SET monthly_rent = $1, water_rate = $2, electricity_rate = $3 WHERE id = $4',
         [monthly_rent, water_rate, electricity_rate, id]
       );
       
@@ -139,11 +139,11 @@ class Branch {
   // Update all rooms in branch to use branch's monthly rent
   static async syncRoomRates(id) {
     try {
-      await pool.execute(`
-        UPDATE rooms r 
-        JOIN branches b ON r.branch_id = b.id 
-        SET r.monthly_rent = b.monthly_rent 
-        WHERE b.id = ?
+      await pool.query(`
+        UPDATE rooms 
+        SET monthly_rent = b.monthly_rent 
+        FROM branches b 
+        WHERE rooms.branch_id = b.id AND b.id = $1
       `, [id]);
       
       return true;
@@ -157,12 +157,12 @@ class Branch {
   static async delete(id) {
     try {
       // Check if branch has rooms
-      const [rooms] = await pool.execute('SELECT COUNT(*) as count FROM rooms WHERE branch_id = ?', [id]);
-      if (rooms[0].count > 0) {
+      const result = await pool.query('SELECT COUNT(*) as count FROM rooms WHERE branch_id = $1', [id]);
+      if (result.rows[0].count > 0) {
         throw new Error('Cannot delete branch with existing rooms');
       }
 
-      await pool.execute('DELETE FROM branches WHERE id = ?', [id]);
+      await pool.query('DELETE FROM branches WHERE id = $1', [id]);
       return true;
     } catch (error) {
       console.error('Error deleting branch:', error);
@@ -173,7 +173,7 @@ class Branch {
   // Get branch stats
   static async getStats() {
     try {
-      const [rows] = await pool.execute(`
+      const result = await pool.query(`
         SELECT 
           COUNT(DISTINCT b.id) as total_branches,
           COUNT(r.id) as total_rooms,
@@ -186,7 +186,7 @@ class Branch {
         LEFT JOIN rooms r ON b.id = r.branch_id
       `);
       
-      return rows[0];
+      return result.rows[0];
     } catch (error) {
       console.error('Error getting branch stats:', error);
       throw error;
@@ -194,4 +194,4 @@ class Branch {
   }
 }
 
-module.exports = Branch; 
+export default Branch; 

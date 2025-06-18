@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server'
 import { requireAuth } from '../../../../../lib/auth'
 
-const Setting = require('../../../../../models/setting')
+import Setting from '../../../../../models/setting.js'
 
 export async function PUT(request) {
   try {

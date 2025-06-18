@@ -14,11 +14,12 @@ export async function POST(request) {
     }
 
     // Find user by username
-    const [rows] = await pool.execute(
-      'SELECT * FROM users WHERE username = ?',
+    const rowsResult = await pool.query(
+      'SELECT * FROM users WHERE username = $1',
       [username]
     )
 
+    const rows = rowsResult.rows
     if (rows.length === 0) {
       return NextResponse.json(
         { success: false, message: 'Invalid credentials' },

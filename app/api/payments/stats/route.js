@@ -16,36 +16,51 @@ export async function GET(request) {
     // Get current month
     const currentMonth = new Date().toISOString().slice(0, 7) // YYYY-MM
 
-    // Calculate statistics
-    const [monthlyStats] = await pool.execute(`
+    // Calculate statistics (including archived payments)
+    const monthlyStatsResult = await pool.query(`
+      WITH all_payments AS (
+        SELECT amount, payment_date FROM payments
+        UNION ALL
+        SELECT amount, payment_date FROM payment_history
+      )
       SELECT 
         COALESCE(SUM(amount), 0) as monthly_collected,
         COUNT(*) as monthly_payments
-      FROM payments 
-      WHERE DATE_FORMAT(payment_date, '%Y-%m') = ?
+      FROM all_payments
+      WHERE TO_CHAR(payment_date, 'YYYY-MM') = $1
     `, [currentMonth])
 
-    const [totalStats] = await pool.execute(`
+    const totalStatsResult = await pool.query(`
+      WITH all_payments AS (
+        SELECT amount FROM payments
+        UNION ALL
+        SELECT amount FROM payment_history
+      )
       SELECT 
         COALESCE(SUM(amount), 0) as total_collected,
         COUNT(*) as total_payments
-      FROM payments
+      FROM all_payments
     `)
 
-    const [averageStats] = await pool.execute(`
+    const averageStatsResult = await pool.query(`
+      WITH all_payments AS (
+        SELECT amount FROM payments
+        UNION ALL
+        SELECT amount FROM payment_history
+      )
       SELECT 
         COALESCE(AVG(amount), 0) as average_payment
-      FROM payments
+      FROM all_payments
     `)
 
     return NextResponse.json({
       success: true,
       stats: {
-        monthly_collected: parseFloat(monthlyStats[0].monthly_collected),
-        monthly_payments: monthlyStats[0].monthly_payments,
-        total_collected: parseFloat(totalStats[0].total_collected),
-        total_payments: totalStats[0].total_payments,
-        average_payment: parseFloat(averageStats[0].average_payment)
+        monthly_collected: parseFloat(monthlyStatsResult.rows[0].monthly_collected),
+        monthly_payments: monthlyStatsResult.rows[0].monthly_payments,
+        total_collected: parseFloat(totalStatsResult.rows[0].total_collected),
+        total_payments: totalStatsResult.rows[0].total_payments,
+        average_payment: parseFloat(averageStatsResult.rows[0].average_payment)
       }
     })
 

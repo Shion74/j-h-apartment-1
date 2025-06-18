@@ -17,103 +17,104 @@ export async function POST(request) {
 
     console.log('🔔 Processing billing reminders...')
 
-    // Get bills that need reminders (due within 3 days or overdue)
-    const billsNeedingReminders = await Bill.getBillsNeedingReminders()
+    // Get tenants that need bill creation reminders
+    const tenantsNeedingReminders = await Bill.getBillsNeedingReminders()
     
-    if (billsNeedingReminders.length === 0) {
-      console.log('✅ No bills need reminders today')
+    if (tenantsNeedingReminders.length === 0) {
+      console.log('✅ No tenants need bill creation reminders today')
       return NextResponse.json({
         success: true,
-        message: 'No bills need reminders today',
-        bills_processed: 0,
+        message: 'No tenants need bill creation reminders today',
+        tenants_processed: 0,
         reminders_sent: 0
       })
     }
 
-    console.log(`📋 Found ${billsNeedingReminders.length} bills needing reminders`)
+    console.log(`📋 Found ${tenantsNeedingReminders.length} tenants needing bill creation reminders`)
 
-    // Filter bills that haven't had a reminder sent today
+    // Filter tenants that haven't had a reminder sent today
     const today = new Date().toISOString().split('T')[0]
-    const billsToRemind = []
+    const tenantsToRemind = []
 
-    for (const bill of billsNeedingReminders) {
-      // Check if reminder was already sent today for this bill
-      const [existingReminder] = await pool.execute(`
+    for (const tenant of tenantsNeedingReminders) {
+      // Check if bill creation reminder was already sent today for this tenant
+      const existingReminderResult = await pool.query(`
         SELECT id FROM billing_reminders 
-        WHERE bill_id = ? AND reminder_date = ?
-      `, [bill.id, today])
+        WHERE tenant_id = $1 AND reminder_date = $2 AND reminder_type = 'bill_creation'
+      `, [tenant.tenant_id, today])
 
+    const existingReminder = existingReminderResult.rows
       if (existingReminder.length === 0) {
-        billsToRemind.push(bill)
+        tenantsToRemind.push(tenant)
       }
     }
 
-    if (billsToRemind.length === 0) {
-      console.log('✅ All reminders for today have already been sent')
+    if (tenantsToRemind.length === 0) {
+      console.log('✅ All bill creation reminders for today have already been sent')
       return NextResponse.json({
         success: true,
-        message: 'All reminders for today have already been sent',
-        bills_processed: billsNeedingReminders.length,
+        message: 'All bill creation reminders for today have already been sent',
+        tenants_processed: tenantsNeedingReminders.length,
         reminders_sent: 0
       })
     }
 
-    console.log(`📧 Sending reminder for ${billsToRemind.length} bills`)
+    console.log(`📧 Sending bill creation reminder for ${tenantsToRemind.length} tenants`)
 
     // Send email reminder to management
-    const emailResult = await emailService.sendBillingReminderToManagement(billsToRemind)
+    const emailResult = await emailService.sendBillingReminderToManagement(tenantsToRemind)
     
     let remindersSent = 0
     let errors = []
 
     if (emailResult.success) {
       // Record reminders in database
-      for (const bill of billsToRemind) {
+      for (const tenant of tenantsToRemind) {
         try {
-          await pool.execute(`
+          await pool.query(`
             INSERT INTO billing_reminders 
-            (bill_id, reminder_date, days_before_due, email_sent, email_sent_at) 
-            VALUES (?, ?, ?, TRUE, NOW())
-          `, [bill.id, today, bill.days_until_due])
+            (tenant_id, reminder_date, days_before_due, email_sent, email_sent_at, reminder_type) 
+            VALUES ($1, $2, $3, TRUE, NOW(), 'bill_creation') RETURNING id
+          `, [tenant.tenant_id, today, tenant.days_until_due])
 
           // Also log in email_notifications table
-          await pool.execute(`
+          await pool.query(`
             INSERT INTO email_notifications 
             (tenant_id, email_type, email_subject, recipient_email, status, sent_at) 
-            VALUES (?, 'billing_reminder', ?, 'official.jhapartment@gmail.com', 'sent', NOW())
-          `, [bill.tenant_id, `Billing Reminder - ${bill.tenant_name} - Room ${bill.room_number}`])
+            VALUES ($1, 'bill_creation_reminder', $2, 'official.jhapartment@gmail.com', 'sent', NOW()) RETURNING id
+          `, [tenant.tenant_id, `Bill Creation Reminder - ${tenant.tenant_name} - Room ${tenant.room_number}`])
 
           remindersSent++
         } catch (error) {
-          console.error(`❌ Failed to record reminder for bill ${bill.id}:`, error)
+          console.error(`❌ Failed to record reminder for tenant ${tenant.tenant_id}:`, error)
           errors.push({
-            bill_id: bill.id,
-            tenant_name: bill.tenant_name,
+            tenant_id: tenant.tenant_id,
+            tenant_name: tenant.tenant_name,
             error: error.message
           })
         }
       }
 
-      console.log(`✅ Successfully sent billing reminder email with ${remindersSent} bills`)
+      console.log(`✅ Successfully sent bill creation reminder email for ${remindersSent} tenants`)
     } else {
-      console.error('❌ Failed to send billing reminder email:', emailResult.error)
+      console.error('❌ Failed to send bill creation reminder email:', emailResult.error)
       
       // Record failed attempts
-      for (const bill of billsToRemind) {
+      for (const tenant of tenantsToRemind) {
         try {
-          await pool.execute(`
+          await pool.query(`
             INSERT INTO billing_reminders 
-            (bill_id, reminder_date, days_before_due, email_sent, email_sent_at) 
-            VALUES (?, ?, ?, FALSE, NULL)
-          `, [bill.id, today, bill.days_until_due])
+            (tenant_id, reminder_date, days_before_due, email_sent, email_sent_at, reminder_type) 
+            VALUES ($1, $2, $3, FALSE, NULL, 'bill_creation') RETURNING id
+          `, [tenant.tenant_id, today, tenant.days_until_due])
 
-          await pool.execute(`
+          await pool.query(`
             INSERT INTO email_notifications 
             (tenant_id, email_type, email_subject, recipient_email, status, error_message) 
-            VALUES (?, 'billing_reminder', ?, 'official.jhapartment@gmail.com', 'failed', ?)
-          `, [bill.tenant_id, `Billing Reminder - ${bill.tenant_name} - Room ${bill.room_number}`, emailResult.error])
+            VALUES ($1, 'bill_creation_reminder', $2, 'official.jhapartment@gmail.com', 'failed', $3) RETURNING id
+          `, [tenant.tenant_id, `Bill Creation Reminder - ${tenant.tenant_name} - Room ${tenant.room_number}`, emailResult.error])
         } catch (recordError) {
-          console.error(`❌ Failed to record failed reminder for bill ${bill.id}:`, recordError)
+          console.error(`❌ Failed to record failed reminder for tenant ${tenant.tenant_id}:`, recordError)
         }
       }
     }
@@ -121,10 +122,10 @@ export async function POST(request) {
     return NextResponse.json({
       success: true,
       message: emailResult.success ? 
-        `Billing reminder sent successfully for ${remindersSent} bills` : 
-        `Failed to send billing reminder: ${emailResult.error}`,
-      bills_processed: billsNeedingReminders.length,
-      bills_to_remind: billsToRemind.length,
+        `Bill creation reminder sent successfully for ${remindersSent} tenants` : 
+        `Failed to send bill creation reminder: ${emailResult.error}`,
+      tenants_processed: tenantsNeedingReminders.length,
+      tenants_to_remind: tenantsToRemind.length,
       reminders_sent: remindersSent,
       email_result: emailResult,
       errors: errors.length > 0 ? errors : undefined
@@ -151,21 +152,22 @@ export async function GET(request) {
       )
     }
 
-    // Get bills that need reminders
-    const billsNeedingReminders = await Bill.getBillsNeedingReminders()
+    // Get tenants that need bill creation reminders
+    const tenantsNeedingReminders = await Bill.getBillsNeedingReminders()
     
     // Check which ones haven't had reminders sent today
     const today = new Date().toISOString().split('T')[0]
-    const billsWithReminderStatus = []
+    const tenantsWithReminderStatus = []
 
-    for (const bill of billsNeedingReminders) {
-      const [existingReminder] = await pool.execute(`
+    for (const tenant of tenantsNeedingReminders) {
+      const existingReminderResult = await pool.query(`
         SELECT id, email_sent, email_sent_at FROM billing_reminders 
-        WHERE bill_id = ? AND reminder_date = ?
-      `, [bill.id, today])
+        WHERE tenant_id = $1 AND reminder_date = $2 AND reminder_type = 'bill_creation'
+      `, [tenant.tenant_id, today])
 
-      billsWithReminderStatus.push({
-        ...bill,
+    const existingReminder = existingReminderResult.rows
+      tenantsWithReminderStatus.push({
+        ...tenant,
         reminder_sent_today: existingReminder.length > 0,
         reminder_details: existingReminder[0] || null
       })
@@ -173,9 +175,9 @@ export async function GET(request) {
 
     return NextResponse.json({
       success: true,
-      bills_needing_reminders: billsNeedingReminders.length,
-      bills_without_reminders_today: billsWithReminderStatus.filter(b => !b.reminder_sent_today).length,
-      bills: billsWithReminderStatus
+      tenants_needing_reminders: tenantsNeedingReminders.length,
+      tenants_without_reminders_today: tenantsWithReminderStatus.filter(t => !t.reminder_sent_today).length,
+      tenants: tenantsWithReminderStatus
     })
 
   } catch (error) {

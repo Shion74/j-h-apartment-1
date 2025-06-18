@@ -14,13 +14,14 @@ export async function GET(request) {
     }
 
     // Get email settings from database
-    const [settings] = await pool.execute(`
+    const settingsResult = await pool.query(`
       SELECT setting_key, setting_value 
       FROM settings 
       WHERE setting_key IN (
         'smtp_host', 'smtp_port', 'smtp_user', 'smtp_password', 
         'smtp_from_email', 'smtp_from_name'
       )
+    const settings = settingsResult.rows
     `)
 
     // Format settings into object
@@ -79,7 +80,7 @@ export async function PUT(request) {
         if (validSettings.includes(key)) {
           await connection.execute(`
             INSERT INTO settings (setting_key, setting_value, description) 
-            VALUES (?, ?, ?)
+            VALUES ($1, $2, $1) RETURNING id
             ON DUPLICATE KEY UPDATE 
             setting_value = VALUES(setting_value),
             updated_at = CURRENT_TIMESTAMP

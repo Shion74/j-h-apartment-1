@@ -18,8 +18,9 @@ export default function SettingsPage() {
   const [loading, setLoading] = useState(true)
   const [savingBranch, setSavingBranch] = useState(null)
   const [globalSettings, setGlobalSettings] = useState({
-    electric_rate_per_kwh: 12.00,
-    water_fixed_amount: 200.00
+    electric_rate_per_kwh: 11.00,
+    water_fixed_amount: 200.00,
+    penalty_fee_percentage: 1.00
   })
 
   useEffect(() => {
@@ -64,7 +65,7 @@ export default function SettingsPage() {
   const handleBranchRateChange = (branchId, field, value) => {
     setBranches(prev => prev.map(branch => 
       branch.id === branchId 
-        ? { ...branch, [field]: parseFloat(value) || 0 }
+        ? { ...branch, [field]: value === '' ? '' : (parseFloat(value) || 0) }
         : branch
     ))
   }
@@ -107,10 +108,18 @@ export default function SettingsPage() {
 
   const updateGlobalSettings = async (setting, value) => {
     try {
-      const endpoint = setting === 'electric_rate_per_kwh' ? 'electricity' : 'water'
-      const payload = setting === 'electric_rate_per_kwh' 
-        ? { rate: parseFloat(value) }
-        : { amount: parseFloat(value) }
+      let endpoint, payload
+      
+      if (setting === 'electric_rate_per_kwh') {
+        endpoint = 'electricity'
+        payload = { rate: parseFloat(value) }
+      } else if (setting === 'water_fixed_amount') {
+        endpoint = 'water'
+        payload = { amount: parseFloat(value) }
+      } else if (setting === 'penalty_fee_percentage') {
+        endpoint = 'penalty'
+        payload = { percentage: parseFloat(value) }
+      }
 
       const response = await fetch(`/api/settings/rates/${endpoint}`, {
         method: 'PUT',
@@ -138,6 +147,117 @@ export default function SettingsPage() {
     }
   }
 
+  const updateAndSyncGlobalSettings = async (setting, value) => {
+    const confirmMessage = setting === 'electric_rate_per_kwh' 
+      ? `Update global electricity rate to ₱${value}/kWh and sync to all ${branches.length} branches?`
+      : `Update global water rate to ₱${value}/room and sync to all ${branches.length} branches?`
+    
+    if (!confirm(confirmMessage)) {
+      return
+    }
+
+    try {
+      setLoading(true)
+      
+      // First update the global setting
+      await updateGlobalSettings(setting, value)
+      
+      // Then sync to all branches
+      const updates = branches.map(branch => {
+        const updatedRates = { ...branch }
+        if (setting === 'electric_rate_per_kwh') {
+          updatedRates.electricity_rate = parseFloat(value)
+        } else {
+          updatedRates.water_rate = parseFloat(value)
+        }
+
+        return fetch(`/api/branches/${branch.id}/rates`, {
+          method: 'PUT',
+          headers: {
+            'Authorization': `Bearer ${localStorage.getItem('token')}`,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            monthly_rent: updatedRates.monthly_rent,
+            water_rate: updatedRates.water_rate,
+            electricity_rate: updatedRates.electricity_rate,
+            sync_rooms: false
+          })
+        })
+      })
+
+      const results = await Promise.all(updates)
+      const successCount = results.filter(r => r.ok).length
+      
+      if (successCount === branches.length) {
+        toast.success('Settings updated successfully')
+        fetchData() // Refresh data
+      } else {
+        toast.error('Partially updated')
+        fetchData() // Refresh data anyway
+      }
+    } catch (error) {
+      console.error('Error updating and syncing rates:', error)
+      toast.error('Failed to update and sync rates')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const syncGlobalRatesToBranches = async (setting) => {
+    const confirmMessage = setting === 'electric_rate_per_kwh' 
+      ? `Are you sure you want to update ALL branches' electricity rates to ₱${globalSettings.electric_rate_per_kwh}/kWh?`
+      : `Are you sure you want to update ALL branches' water rates to ₱${globalSettings.water_fixed_amount}/room?`
+    
+    if (!confirm(confirmMessage)) {
+      return
+    }
+
+    try {
+      setLoading(true)
+      
+      // Update each branch with the global rate
+      const updates = branches.map(branch => {
+        const updatedRates = { ...branch }
+        if (setting === 'electric_rate_per_kwh') {
+          updatedRates.electricity_rate = globalSettings.electric_rate_per_kwh
+        } else {
+          updatedRates.water_rate = globalSettings.water_fixed_amount
+        }
+
+        return fetch(`/api/branches/${branch.id}/rates`, {
+          method: 'PUT',
+          headers: {
+            'Authorization': `Bearer ${localStorage.getItem('token')}`,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            monthly_rent: updatedRates.monthly_rent,
+            water_rate: updatedRates.water_rate,
+            electricity_rate: updatedRates.electricity_rate,
+            sync_rooms: false
+          })
+        })
+      })
+
+      const results = await Promise.all(updates)
+      const successCount = results.filter(r => r.ok).length
+      
+      if (successCount === branches.length) {
+        toast.success('Rates synced successfully')
+        fetchData() // Refresh data
+      } else {
+        toast.error('Sync partially failed')
+        fetchData() // Refresh data anyway
+      }
+    } catch (error) {
+      console.error('Error syncing rates to branches:', error)
+      toast.error('Failed to sync rates to branches')
+    } finally {
+      setLoading(false)
+    }
+  }
+
   const formatCurrency = (amount) => {
     return new Intl.NumberFormat('en-PH', {
       style: 'currency',
@@ -157,7 +277,7 @@ export default function SettingsPage() {
 
   return (
     <>
-      <Toaster position="top-right" />
+              <Toaster position="top-center" />
       <DashboardLayout>
         <div className="px-4 sm:px-6 lg:px-8 pb-6">
           {/* Header */}
@@ -183,30 +303,36 @@ export default function SettingsPage() {
                 <p className="text-sm text-gray-600 mb-4">
                   Global default rate per kilowatt hour (kWh) - used when branch doesn't have specific rate
                 </p>
-                <div className="flex items-center space-x-3">
-                  <div className="flex-1">
-                    <div className="relative">
-                      <span className="absolute left-3 top-3 text-gray-500">₱</span>
-                      <input
-                        type="number"
-                        step="0.01"
-                        min="0"
-                        value={globalSettings.electric_rate_per_kwh}
-                        onChange={(e) => setGlobalSettings(prev => ({
-                          ...prev,
-                          electric_rate_per_kwh: parseFloat(e.target.value) || 0
-                        }))}
-                        className="pl-8 pr-16 block w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-blue-500 focus:border-blue-500"
-                      />
-                      <span className="absolute right-3 top-3 text-gray-500">per kWh</span>
+                <div className="space-y-3">
+                  <div className="flex items-center space-x-3">
+                    <div className="flex-1">
+                      <div className="relative">
+                        <span className="absolute left-3 top-3 text-gray-500">₱</span>
+                        <input
+                          type="number"
+                          step="0.01"
+                          min="0"
+                          value={globalSettings.electric_rate_per_kwh}
+                          onChange={(e) => {
+                            const value = e.target.value
+                            setGlobalSettings(prev => ({
+                              ...prev,
+                              electric_rate_per_kwh: value === '' ? '' : (parseFloat(value) || 0)
+                            }))
+                          }}
+                          className="pl-8 pr-16 block w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-blue-500 focus:border-blue-500"
+                        />
+                        <span className="absolute right-3 top-3 text-gray-500">per kWh</span>
+                      </div>
                     </div>
+                    <button
+                      onClick={() => updateAndSyncGlobalSettings('electric_rate_per_kwh', globalSettings.electric_rate_per_kwh)}
+                      disabled={loading}
+                      className="px-4 py-2 bg-yellow-600 text-white rounded-md hover:bg-yellow-700 focus:outline-none focus:ring-2 focus:ring-yellow-500 disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      {loading ? 'Updating...' : 'Update & Sync to Branches'}
+                    </button>
                   </div>
-                  <button
-                    onClick={() => updateGlobalSettings('electric_rate_per_kwh', globalSettings.electric_rate_per_kwh)}
-                    className="px-4 py-2 bg-yellow-600 text-white rounded-md hover:bg-yellow-700 focus:outline-none focus:ring-2 focus:ring-yellow-500"
-                  >
-                    Update
-                  </button>
                 </div>
               </div>
 
@@ -219,30 +345,82 @@ export default function SettingsPage() {
                 <p className="text-sm text-gray-600 mb-4">
                   Global default fixed water amount per room per month - used when branch doesn't have specific rate
                 </p>
+                <div className="space-y-3">
+                  <div className="flex items-center space-x-3">
+                    <div className="flex-1">
+                      <div className="relative">
+                        <span className="absolute left-3 top-3 text-gray-500">₱</span>
+                        <input
+                          type="number"
+                          step="0.01"
+                          min="0"
+                          value={globalSettings.water_fixed_amount}
+                          onChange={(e) => {
+                            const value = e.target.value
+                            setGlobalSettings(prev => ({
+                              ...prev,
+                              water_fixed_amount: value === '' ? '' : (parseFloat(value) || 0)
+                            }))
+                          }}
+                          className="pl-8 pr-20 block w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-blue-500 focus:border-blue-500"
+                        />
+                        <span className="absolute right-3 top-3 text-gray-500">per room</span>
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => updateAndSyncGlobalSettings('water_fixed_amount', globalSettings.water_fixed_amount)}
+                      disabled={loading}
+                      className="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      {loading ? 'Updating...' : 'Update & Sync to Branches'}
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Global Penalty Fee Rate */}
+            <div className="bg-white shadow rounded-lg p-6">
+              <div className="flex items-center mb-4">
+                <ExclamationTriangleIcon className="h-6 w-6 text-red-500 mr-3" />
+                <h3 className="text-lg font-medium text-gray-900">Late Payment Penalty Fee</h3>
+              </div>
+              <p className="text-sm text-gray-600 mb-4">
+                Percentage fee applied to the total bill amount when payment is made more than 10 days after the billing period ends. Fee is automatically rounded to the nearest whole number.
+              </p>
+              <div className="space-y-3">
                 <div className="flex items-center space-x-3">
                   <div className="flex-1">
                     <div className="relative">
-                      <span className="absolute left-3 top-3 text-gray-500">₱</span>
                       <input
                         type="number"
                         step="0.01"
                         min="0"
-                        value={globalSettings.water_fixed_amount}
-                        onChange={(e) => setGlobalSettings(prev => ({
-                          ...prev,
-                          water_fixed_amount: parseFloat(e.target.value) || 0
-                        }))}
-                        className="pl-8 pr-20 block w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-blue-500 focus:border-blue-500"
+                        max="100"
+                        value={globalSettings.penalty_fee_percentage}
+                        onChange={(e) => {
+                          const value = e.target.value
+                          setGlobalSettings(prev => ({
+                            ...prev,
+                            penalty_fee_percentage: value === '' ? '' : (parseFloat(value) || 0)
+                          }))
+                        }}
+                        className="pr-8 block w-full border border-gray-300 rounded-md px-3 py-2 focus:outline-none focus:ring-red-500 focus:border-red-500"
                       />
-                      <span className="absolute right-3 top-3 text-gray-500">per room</span>
+                      <span className="absolute right-3 top-3 text-gray-500">%</span>
                     </div>
                   </div>
                   <button
-                    onClick={() => updateGlobalSettings('water_fixed_amount', globalSettings.water_fixed_amount)}
-                    className="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    onClick={() => updateGlobalSettings('penalty_fee_percentage', globalSettings.penalty_fee_percentage)}
+                    disabled={loading}
+                    className="px-4 py-2 bg-red-600 text-white rounded-md hover:bg-red-700 focus:outline-none focus:ring-2 focus:ring-red-500 disabled:opacity-50 disabled:cursor-not-allowed"
                   >
-                    Update
+                    {loading ? 'Updating...' : 'Update Penalty Rate'}
                   </button>
+                </div>
+                <div className="text-xs text-gray-500">
+                  <p><strong>Example:</strong> If penalty is {globalSettings.penalty_fee_percentage}% and bill is ₱3,500, late fee = ₱{Math.round(3500 * (globalSettings.penalty_fee_percentage / 100)).toLocaleString()}</p>
+                  <p><strong>Note:</strong> Penalty applies when payment is made more than 10 days after the billing period ends, not the bill generation date.</p>
                 </div>
               </div>
             </div>

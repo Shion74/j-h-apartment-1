@@ -23,19 +23,19 @@ export async function GET(request) {
              t.contract_start_date, t.contract_end_date
       FROM rooms r
       LEFT JOIN branches b ON r.branch_id = b.id
-      LEFT JOIN tenants t ON r.id = t.room_id AND t.contract_status = 'active'
+      LEFT JOIN tenants t ON r.id = t.room_id AND t.status = 'active'
     `
     
     const params = []
     const conditions = []
 
     if (branchId) {
-      conditions.push('r.branch_id = ?')
+      conditions.push('r.branch_id = $' + (params.length + 1))
       params.push(branchId)
     }
 
     if (status) {
-      conditions.push('r.status = ?')
+      conditions.push('r.status = $' + (params.length + 1))
       params.push(status)
     }
 
@@ -45,8 +45,9 @@ export async function GET(request) {
 
     query += ' ORDER BY b.name, r.room_number'
 
-    const [rooms] = await pool.execute(query, params)
+    const roomsResult = await pool.query(query, params)
 
+    const rooms = roomsResult.rows
     return NextResponse.json({
       success: true,
       rooms: rooms.map(room => ({
@@ -108,11 +109,12 @@ export async function POST(request) {
     }
 
     // Check if branch exists
-    const [branches] = await pool.execute(
-      'SELECT id FROM branches WHERE id = ?',
+    const branchesResult = await pool.query(
+      'SELECT id FROM branches WHERE id = $1',
       [branch_id]
     )
 
+    const branches = branchesResult.rows
     if (branches.length === 0) {
       return NextResponse.json(
         { success: false, message: 'Branch not found' },
@@ -121,11 +123,12 @@ export async function POST(request) {
     }
 
     // Check if room number already exists in the branch
-    const [existingRooms] = await pool.execute(
-      'SELECT id FROM rooms WHERE room_number = ? AND branch_id = ?',
+    const existingRoomsResult = await pool.query(
+      'SELECT id FROM rooms WHERE room_number = $1 AND branch_id = $2',
       [room_number, branch_id]
     )
 
+    const existingRooms = existingRoomsResult.rows
     if (existingRooms.length > 0) {
       return NextResponse.json(
         { success: false, message: 'Room number already exists in this branch' },
@@ -134,30 +137,32 @@ export async function POST(request) {
     }
 
     // Insert new room
-    const [result] = await pool.execute(`
+    const insertResult = await pool.query(`
       INSERT INTO rooms (room_number, monthly_rent, branch_id, status)
-      VALUES (?, ?, ?, 'vacant')
+      VALUES ($1, $2, $3, 'vacant')
+      RETURNING id
     `, [room_number, parseFloat(monthly_rent), branch_id])
 
     // Get the newly created room with branch info
-    const [newRoom] = await pool.execute(`
+    const newRoomResult = await pool.query(`
       SELECT r.*, b.name as branch_name, b.address as branch_address
       FROM rooms r
       LEFT JOIN branches b ON r.branch_id = b.id
-      WHERE r.id = ?
-    `, [result.insertId])
+      WHERE r.id = $1
+    `, [insertResult.rows[0].id])
 
+    const newRoom = newRoomResult.rows[0]
     return NextResponse.json({
       success: true,
       message: 'Room created successfully',
       room: {
-        id: newRoom[0].id,
-        room_number: newRoom[0].room_number,
-        monthly_rent: parseFloat(newRoom[0].monthly_rent),
-        status: newRoom[0].status,
-        branch_id: newRoom[0].branch_id,
-        branch_name: newRoom[0].branch_name,
-        branch_address: newRoom[0].branch_address,
+        id: newRoom.id,
+        room_number: newRoom.room_number,
+        monthly_rent: parseFloat(newRoom.monthly_rent),
+        status: newRoom.status,
+        branch_id: newRoom.branch_id,
+        branch_name: newRoom.branch_name,
+        branch_address: newRoom.branch_address,
         tenant: null
       }
     })
@@ -210,11 +215,12 @@ export async function PUT(request) {
     }
 
     // Check if room exists
-    const [existingRooms] = await pool.execute(
-      'SELECT id FROM rooms WHERE id = ?',
+    const existingRoomsResult = await pool.query(
+      'SELECT id FROM rooms WHERE id = $1',
       [id]
     )
 
+    const existingRooms = existingRoomsResult.rows
     if (existingRooms.length === 0) {
       return NextResponse.json(
         { success: false, message: 'Room not found' },
@@ -223,11 +229,12 @@ export async function PUT(request) {
     }
 
     // Check if branch exists
-    const [branches] = await pool.execute(
-      'SELECT id FROM branches WHERE id = ?',
+    const branchesResult = await pool.query(
+      'SELECT id FROM branches WHERE id = $1',
       [branch_id]
     )
 
+    const branches = branchesResult.rows
     if (branches.length === 0) {
       return NextResponse.json(
         { success: false, message: 'Branch not found' },
@@ -236,11 +243,12 @@ export async function PUT(request) {
     }
 
     // Check if room number conflicts with other rooms in the same branch
-    const [roomConflicts] = await pool.execute(
-      'SELECT id FROM rooms WHERE room_number = ? AND branch_id = ? AND id != ?',
+    const roomConflictsResult = await pool.query(
+      'SELECT id FROM rooms WHERE room_number = $1 AND branch_id = $2 AND id != $3',
       [room_number, branch_id, id]
     )
 
+    const roomConflicts = roomConflictsResult.rows
     if (roomConflicts.length > 0) {
       return NextResponse.json(
         { success: false, message: 'Room number already exists in this branch' },
@@ -249,36 +257,37 @@ export async function PUT(request) {
     }
 
     // Update room
-    await pool.execute(`
+    await pool.query(`
       UPDATE rooms 
-      SET room_number = ?, monthly_rent = ?, branch_id = ?, status = COALESCE(?, status)
-      WHERE id = ?
+      SET room_number = $1, monthly_rent = $2, branch_id = $3, status = COALESCE($4, status), updated_at = NOW()
+      WHERE id = $5
     `, [room_number, parseFloat(monthly_rent), branch_id, status, id])
 
     // Get updated room with branch info
-    const [updatedRoom] = await pool.execute(`
+    const updatedRoomResult = await pool.query(`
       SELECT r.*, b.name as branch_name, b.address as branch_address,
              t.name as tenant_name, t.email as tenant_email
       FROM rooms r
       LEFT JOIN branches b ON r.branch_id = b.id
-      LEFT JOIN tenants t ON r.id = t.room_id AND t.contract_status = 'active'
-      WHERE r.id = ?
+      LEFT JOIN tenants t ON r.id = t.room_id AND t.status = 'active'
+      WHERE r.id = $1
     `, [id])
 
+    const updatedRoom = updatedRoomResult.rows[0]
     return NextResponse.json({
       success: true,
       message: 'Room updated successfully',
       room: {
-        id: updatedRoom[0].id,
-        room_number: updatedRoom[0].room_number,
-        monthly_rent: parseFloat(updatedRoom[0].monthly_rent),
-        status: updatedRoom[0].status,
-        branch_id: updatedRoom[0].branch_id,
-        branch_name: updatedRoom[0].branch_name,
-        branch_address: updatedRoom[0].branch_address,
-        tenant: updatedRoom[0].tenant_name ? {
-          name: updatedRoom[0].tenant_name,
-          email: updatedRoom[0].tenant_email
+        id: updatedRoom.id,
+        room_number: updatedRoom.room_number,
+        monthly_rent: parseFloat(updatedRoom.monthly_rent),
+        status: updatedRoom.status,
+        branch_id: updatedRoom.branch_id,
+        branch_name: updatedRoom.branch_name,
+        branch_address: updatedRoom.branch_address,
+        tenant: updatedRoom.tenant_name ? {
+          name: updatedRoom.tenant_name,
+          email: updatedRoom.tenant_email
         } : null
       }
     })
@@ -314,11 +323,12 @@ export async function DELETE(request) {
     }
 
     // Check if room has active tenants
-    const [tenants] = await pool.execute(
-      'SELECT COUNT(*) as tenant_count FROM tenants WHERE room_id = ? AND contract_status = "active"',
-      [id]
+    const tenantsResult = await pool.query(
+      'SELECT COUNT(*) as tenant_count FROM tenants WHERE room_id = $1 AND status = $2',
+      [id, 'active']
     )
 
+    const tenants = tenantsResult.rows
     if (tenants[0].tenant_count > 0) {
       return NextResponse.json(
         { success: false, message: 'Cannot delete room with active tenants' },
@@ -327,12 +337,12 @@ export async function DELETE(request) {
     }
 
     // Delete room
-    const [result] = await pool.execute(
-      'DELETE FROM rooms WHERE id = ?',
+    const result = await pool.query(
+      'DELETE FROM rooms WHERE id = $1',
       [id]
     )
 
-    if (result.affectedRows === 0) {
+    if (result.rowCount === 0) {
       return NextResponse.json(
         { success: false, message: 'Room not found' },
         { status: 404 }

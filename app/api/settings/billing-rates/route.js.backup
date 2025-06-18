@@ -1,0 +1,115 @@
+import { NextResponse } from 'next/server'
+import { pool } from '../../../../lib/database'
+import { requireAuth } from '../../../../lib/auth'
+
+export async function GET(request) {
+  try {
+    // Check authentication
+    const authResult = requireAuth(request)
+    if (authResult.error) {
+      return NextResponse.json(
+        { success: false, message: authResult.error },
+        { status: authResult.status }
+      )
+    }
+
+    // Get billing-related settings
+    const [settings] = await pool.execute(`
+      SELECT setting_key, setting_value 
+      FROM settings 
+      WHERE setting_key IN ('electric_rate_per_kwh', 'water_fixed_amount', 'default_room_rate')
+    `)
+
+    // Default values if not found in database
+    const defaultRates = {
+      electric_rate_per_kwh: 12.00,
+      water_fixed_amount: 200.00,
+      default_room_rate: 3500.00
+    }
+
+    const rates = { ...defaultRates }
+    settings.forEach(setting => {
+      rates[setting.setting_key] = parseFloat(setting.setting_value)
+    })
+
+    return NextResponse.json({
+      success: true,
+      rates
+    })
+
+  } catch (error) {
+    console.error('Billing rates fetch error:', error)
+    return NextResponse.json(
+      { success: false, message: 'Internal server error' },
+      { status: 500 }
+    )
+  }
+}
+
+export async function PUT(request) {
+  try {
+    // Check authentication
+    const authResult = requireAuth(request)
+    if (authResult.error) {
+      return NextResponse.json(
+        { success: false, message: authResult.error },
+        { status: authResult.status }
+      )
+    }
+
+    const rates = await request.json()
+
+    // Validate rates
+    const validKeys = ['electric_rate_per_kwh', 'water_fixed_amount', 'default_room_rate']
+    const updates = []
+
+    for (const [key, value] of Object.entries(rates)) {
+      if (validKeys.includes(key) && typeof value === 'number' && value > 0) {
+        updates.push([key, value.toString(), 'number'])
+      }
+    }
+
+    if (updates.length === 0) {
+      return NextResponse.json(
+        { success: false, message: 'No valid billing rates provided' },
+        { status: 400 }
+      )
+    }
+
+    // Update settings in database
+    const connection = await pool.getConnection()
+    await connection.beginTransaction()
+
+    try {
+      for (const [key, value, type] of updates) {
+        await connection.execute(`
+          INSERT INTO settings (setting_key, setting_value, description) 
+          VALUES (?, ?, ?)
+          ON DUPLICATE KEY UPDATE 
+          setting_value = VALUES(setting_value),
+          updated_at = CURRENT_TIMESTAMP
+        `, [key, value, `${key.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase())} setting`])
+      }
+
+      await connection.commit()
+
+      return NextResponse.json({
+        success: true,
+        message: 'Billing rates updated successfully'
+      })
+
+    } catch (error) {
+      await connection.rollback()
+      throw error
+    } finally {
+      connection.release()
+    }
+
+  } catch (error) {
+    console.error('Billing rates update error:', error)
+    return NextResponse.json(
+      { success: false, message: 'Internal server error' },
+      { status: 500 }
+    )
+  }
+} 

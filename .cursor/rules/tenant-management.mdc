@@ -1,0 +1,54 @@
+---
+description: 
+globs: 
+alwaysApply: false
+---
+# Tenant Management System
+
+## Tenant Lifecycle
+1. Registration
+   - Room assignment with branch filtering
+   - Initial deposit collection
+   - Contract creation
+   - Welcome email sent
+
+2. Active Period
+   - Monthly billing cycle management
+   - Payment processing
+   - Contract renewal handling
+   - Deposit balance tracking
+
+3. Move-out Process
+   - Final bill generation
+   - Deposit refund calculation
+   - Room status update
+   - Tenant archival
+
+## Key Files
+- [app/api/tenants/route.js](mdc:app/api/tenants/route.js) - Main tenant API
+- [app/api/tenants/[id]/move-out/route.js](mdc:app/api/tenants/[id]/move-out/route.js) - Move-out processing
+- [app/api/contracts/renew/[tenantId]/route.js](mdc:app/api/contracts/renew/[tenantId]/route.js) - Contract renewal
+
+## Database Structure
+- `tenants` - Active tenant records (includes embedded contract fields)
+- `tenant_history` - Archived tenant records
+- `tenant_deposits` - Deposit tracking
+
+## Contract Management
+Contracts are managed directly in the `tenants` table with these fields:
+- `contract_start_date` - Contract start date
+- `contract_end_date` - Contract end date  
+- `contract_duration_months` - Total contract duration (default: 6 months)
+- `contract_status` - Current status ('active', 'expired', 'renewed', 'terminated')
+- `completed_cycles` - Number of paid billing cycles completed
+
+## Business Rules
+1. Tenants must maintain deposit balance
+2. Contract expiry triggers renewal process
+3. Move-out requires:
+   - No unpaid bills
+   - Final bill settlement
+   - Deposit refund processing
+4. Tenant records are archived after successful move-out
+
+

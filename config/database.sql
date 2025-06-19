@@ -60,7 +60,8 @@ CREATE TABLE rooms (
   UNIQUE KEY unique_room_per_branch (room_number, branch_id)
 );
 
--- Tenants table (includes contract management and deposit fields)
+-- Tenants table (includes embedded contract management and deposit fields)
+-- Note: Contract management is handled directly in this table, not in a separate contracts table
 CREATE TABLE tenants (
   id INT AUTO_INCREMENT PRIMARY KEY,
   name VARCHAR(100) NOT NULL,

@@ -168,6 +168,17 @@ export async function POST(req) {
           
           // Archive all bills to bill_history
           for (const billRecord of tenantBillsResult.rows) {
+            // Get the actual payment date from the most recent payment for this bill
+            const actualPaymentDateResult = await pool.query(`
+              SELECT COALESCE(actual_payment_date, payment_date) as actual_payment_date
+              FROM payments 
+              WHERE bill_id = $1 
+              ORDER BY created_at DESC 
+              LIMIT 1
+            `, [billRecord.id])
+            
+            const actualPaymentDate = actualPaymentDateResult.rows[0]?.actual_payment_date || new Date().toISOString().split('T')[0]
+
             await pool.query(`
               INSERT INTO bill_history (
                 original_bill_id, original_tenant_id, tenant_name, room_id, room_number, branch_name,
@@ -176,10 +187,10 @@ export async function POST(req) {
                 water_amount, extra_fee_amount, extra_fee_description, total_amount,
                 bill_date, due_date, status, is_final_bill, penalty_applied,
                 penalty_fee_amount, prepared_by, notes, total_paid, remaining_balance,
-                payment_date, payment_method, created_at, updated_at, archived_at
+                payment_date, actual_payment_date, payment_method, created_at, updated_at, archived_at
               ) VALUES (
                 $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19,
-                $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, NOW()
+                $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $35, $33, $34, NOW()
               )
             `, [
               billRecord.id, // original_bill_id
@@ -215,7 +226,8 @@ export async function POST(req) {
               new Date().toISOString(), // payment_date (current date since it's being paid now)
               'cash', // payment_method (default for manual move-out)
               billRecord.created_at,
-              billRecord.updated_at
+              billRecord.updated_at,
+              actualPaymentDate // actual_payment_date
             ])
           }
           

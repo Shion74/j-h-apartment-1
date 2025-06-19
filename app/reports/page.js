@@ -21,6 +21,7 @@ export default function ReportsPage() {
   const [loading, setLoading] = useState(false)
   const [emailRecipients, setEmailRecipients] = useState([''])
   const [sendingEmail, setSendingEmail] = useState(false)
+  const [downloadingPDF, setDownloadingPDF] = useState(false)
 
   // Generate current month report on page load
   useEffect(() => {
@@ -55,7 +56,7 @@ export default function ReportsPage() {
     const validEmails = emailRecipients.filter(email => email.trim() && email.includes('@'))
     
     if (validEmails.length === 0) {
-              toast.error('Enter valid email')
+      toast.error('Enter valid email')
       return
     }
 
@@ -75,7 +76,7 @@ export default function ReportsPage() {
 
       const data = await response.json()
       if (data.success) {
-        toast.success('Report sent')
+        toast.success('PDF report sent via email successfully!')
       } else {
         toast.error(data.message || 'Failed to send report')
       }
@@ -84,6 +85,37 @@ export default function ReportsPage() {
       toast.error('Failed to send report')
     } finally {
       setSendingEmail(false)
+    }
+  }
+
+  const downloadPDFReport = async () => {
+    setDownloadingPDF(true)
+    try {
+      const response = await fetch(`/api/reports/monthly/pdf?month=${selectedMonth}`, {
+        headers: {
+          'Authorization': `Bearer ${localStorage.getItem('token')}`
+        }
+      })
+
+      if (response.ok) {
+        const blob = await response.blob()
+        const url = window.URL.createObjectURL(blob)
+        const a = document.createElement('a')
+        a.href = url
+        a.download = `J&H_Monthly_Report_${reportData?.report_period?.month_name?.replace(/\s+/g, '_') || 'Report'}.pdf`
+        document.body.appendChild(a)
+        a.click()
+        document.body.removeChild(a)
+        window.URL.revokeObjectURL(url)
+        toast.success('PDF report downloaded successfully!')
+      } else {
+        toast.error('Failed to download PDF report')
+      }
+    } catch (error) {
+      console.error('Error downloading PDF:', error)
+      toast.error('Failed to download PDF report')
+    } finally {
+      setDownloadingPDF(false)
     }
   }
 
@@ -140,103 +172,149 @@ export default function ReportsPage() {
           </div>
 
           {/* Controls */}
-          <div className="bg-white rounded-lg shadow-sm p-4 sm:p-6 mb-6 sm:mb-8">
-            <div className="flex flex-col space-y-4 lg:space-y-0 lg:flex-row lg:items-end lg:justify-between lg:gap-6">
-              <div className="flex flex-col sm:flex-row sm:items-end space-y-4 sm:space-y-0 sm:space-x-4">
-                <div className="flex-1 sm:flex-initial">
-                  <label className="block text-sm font-medium text-gray-700 mb-1">
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
+            {/* Report Options */}
+            <div className="bg-white rounded-lg shadow-md p-6">
+              <h2 className="text-xl font-semibold text-gray-900 mb-4 flex items-center">
+                <CalendarIcon className="h-6 w-6 mr-2 text-blue-600" />
+                Report Options
+              </h2>
+              
+              <div className="space-y-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">
                     Select Month
                   </label>
-                  <div className="relative">
-                    <CalendarIcon className="absolute left-3 top-1/2 transform -translate-y-1/2 h-5 w-5 text-gray-400" />
-                    <input
-                      type="month"
-                      value={selectedMonth}
-                      onChange={(e) => setSelectedMonth(e.target.value)}
-                      className="w-full pl-10 pr-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                    />
-                  </div>
+                  <input
+                    type="month"
+                    value={selectedMonth}
+                    onChange={(e) => {
+                      setSelectedMonth(e.target.value)
+                      generateReport(e.target.value)
+                    }}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  />
                 </div>
-                <div>
+
+                <div className="flex flex-col space-y-2">
                   <button
                     onClick={() => generateReport(selectedMonth)}
                     disabled={loading}
-                    className="w-full sm:w-auto bg-blue-600 text-white px-4 sm:px-6 py-2 rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center"
+                    className="w-full bg-blue-600 text-white py-2 px-4 rounded-md hover:bg-blue-700 disabled:bg-gray-400 flex items-center justify-center"
                   >
                     {loading ? (
                       <>
                         <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white mr-2"></div>
-                        <span className="hidden sm:inline">Generating...</span>
-                        <span className="sm:hidden">Loading...</span>
+                        Generating...
                       </>
                     ) : (
                       <>
-                        <DocumentArrowDownIcon className="h-4 w-4 sm:h-5 sm:w-5 mr-2" />
-                        <span className="hidden sm:inline">Generate Report</span>
-                        <span className="sm:hidden">Generate</span>
+                        <ChartBarIcon className="h-4 w-4 mr-2" />
+                        Generate Report
                       </>
                     )}
                   </button>
+
+                  {reportData && (
+                    <button
+                      onClick={downloadPDFReport}
+                      disabled={downloadingPDF}
+                      className="w-full bg-green-600 text-white py-2 px-4 rounded-md hover:bg-green-700 disabled:bg-gray-400 flex items-center justify-center"
+                    >
+                      {downloadingPDF ? (
+                        <>
+                          <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white mr-2"></div>
+                          Generating PDF...
+                        </>
+                      ) : (
+                        <>
+                          <DocumentArrowDownIcon className="h-4 w-4 mr-2" />
+                          Download PDF Report
+                        </>
+                      )}
+                    </button>
+                  )}
                 </div>
               </div>
+            </div>
 
-              {/* Email Section */}
-              {reportData && (
-                <div className="border-t pt-4 lg:border-t-0 lg:border-l lg:pt-0 lg:pl-6">
-                  <label className="block text-sm font-medium text-gray-700 mb-2">
-                    Email Recipients
-                  </label>
-                  <div className="space-y-2 mb-3">
+            {/* Email Section */}
+            {reportData && (
+              <div className="bg-white rounded-lg shadow-md p-6">
+                <div className="flex items-center justify-between mb-4">
+                  <h2 className="text-xl font-semibold text-gray-900 flex items-center">
+                    <EnvelopeIcon className="h-6 w-6 mr-2 text-blue-600" />
+                    Email Report
+                  </h2>
+                  <DocumentArrowDownIcon className="h-6 w-6 text-gray-400" />
+                </div>
+                
+                <div className="bg-blue-50 border border-blue-200 rounded-lg p-4 mb-6">
+                  <div className="flex items-start">
+                    <DocumentArrowDownIcon className="h-5 w-5 text-blue-500 mt-0.5 mr-2 flex-shrink-0" />
+                    <div>
+                      <h3 className="text-sm font-medium text-blue-800">PDF Report Attachment</h3>
+                      <p className="text-sm text-blue-700 mt-1">
+                        Reports will be sent as professional PDF attachments with complete financial analysis, 
+                        charts, and detailed breakdowns. The email will include a quick summary with the full 
+                        report attached as a PDF file.
+                      </p>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="space-y-4">
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-2">
+                      Email Recipients
+                    </label>
                     {emailRecipients.map((email, index) => (
-                      <div key={index} className="flex items-center space-x-2">
+                      <div key={index} className="flex items-center space-x-2 mb-2">
                         <input
                           type="email"
                           value={email}
                           onChange={(e) => updateEmailRecipient(index, e.target.value)}
                           placeholder="Enter email address"
-                          className="flex-1 px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent text-sm"
+                          className="flex-1 px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
                         />
                         {emailRecipients.length > 1 && (
                           <button
                             onClick={() => removeEmailRecipient(index)}
-                            className="text-red-600 hover:text-red-800 text-sm"
+                            className="text-red-600 hover:text-red-800"
                           >
-                            Remove
+                            ✕
                           </button>
                         )}
                       </div>
                     ))}
-                  </div>
-                  <div className="flex flex-col sm:flex-row space-y-2 sm:space-y-0 sm:space-x-2">
                     <button
                       onClick={addEmailRecipient}
-                      className="text-blue-600 hover:text-blue-800 text-sm text-center sm:text-left"
+                      className="text-blue-600 hover:text-blue-800 text-sm font-medium"
                     >
-                      + Add Email
-                    </button>
-                    <button
-                      onClick={sendEmailReport}
-                      disabled={sendingEmail}
-                      className="w-full sm:w-auto bg-green-600 text-white px-3 sm:px-4 py-2 rounded-lg hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center text-sm"
-                    >
-                      {sendingEmail ? (
-                        <>
-                          <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white mr-2"></div>
-                          <span className="hidden sm:inline">Sending...</span>
-                          <span className="sm:hidden">Sending...</span>
-                        </>
-                      ) : (
-                        <>
-                          <EnvelopeIcon className="h-4 w-4 mr-2" />
-                          <span className="hidden sm:inline">Send Report</span>
-                          <span className="sm:hidden">Send</span>
-                        </>
-                      )}
+                      + Add another recipient
                     </button>
                   </div>
+
+                  <button
+                    onClick={sendEmailReport}
+                    disabled={sendingEmail || !reportData}
+                    className="w-full bg-blue-600 text-white py-2 px-4 rounded-md hover:bg-blue-700 disabled:bg-gray-400 flex items-center justify-center"
+                  >
+                    {sendingEmail ? (
+                      <>
+                        <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white mr-2"></div>
+                        Generating PDF & Sending...
+                      </>
+                    ) : (
+                      <>
+                        <EnvelopeIcon className="h-4 w-4 mr-2" />
+                        Send PDF Report via Email
+                      </>
+                    )}
+                  </button>
                 </div>
-              )}
-            </div>
+              </div>
+            )}
           </div>
 
           {/* Report Content */}
@@ -249,58 +327,80 @@ export default function ReportsPage() {
                   <span className="hidden sm:inline">Executive Summary - {reportData.report_period.month_name}</span>
                   <span className="sm:hidden">Summary - {reportData.report_period.month_name}</span>
                 </h2>
-                
-                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 sm:gap-6">
-                  <div className="bg-gradient-to-r from-blue-500 to-blue-600 rounded-lg p-4 sm:p-6 text-white">
-                    <div className="flex items-center justify-between">
-                      <div className="flex-1 min-w-0">
-                        <p className="text-blue-100 text-xs sm:text-sm">Total Revenue</p>
-                        <p className="text-lg sm:text-2xl font-bold truncate">{formatCurrency(reportData.financial_summary.total_revenue)}</p>
-                        <p className={`text-xs sm:text-sm bg-white bg-opacity-20 rounded px-2 py-1 mt-2 inline-block`}>
-                          {getGrowthIcon(reportData.financial_summary.revenue_growth)} {Math.abs(reportData.financial_summary.revenue_growth)}% vs last month
-                        </p>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                  {/* Income Section */}
+                  <div className="bg-green-50 rounded-lg p-4">
+                    <h3 className="text-lg font-semibold text-gray-900 mb-4 flex items-center">
+                      <CurrencyDollarIcon className="h-5 w-5 mr-2 text-green-600" />
+                      Income
+                    </h3>
+                    <div className="space-y-3">
+                      <div className="flex justify-between items-center">
+                        <span className="text-gray-600">Room Rental:</span>
+                        <span className="font-medium">{formatCurrency(reportData.financial_summary.total_rent)}</span>
                       </div>
-                      <CurrencyDollarIcon className="h-8 w-8 sm:h-12 sm:w-12 text-blue-200 flex-shrink-0" />
+                      <div className="flex justify-between items-center">
+                        <span className="text-gray-600">Extra Fees:</span>
+                        <span className="font-medium">{formatCurrency(reportData.financial_summary.total_extra_fees)}</span>
+                      </div>
+                      <div className="border-t pt-2 flex justify-between items-center font-semibold">
+                        <span className="text-gray-900">Total Income:</span>
+                        <span className="text-green-600">{formatCurrency(reportData.financial_summary.total_income)}</span>
+                      </div>
                     </div>
                   </div>
 
-                  <div className="bg-gradient-to-r from-green-500 to-green-600 rounded-lg p-4 sm:p-6 text-white">
-                    <div className="flex items-center justify-between">
-                      <div className="flex-1 min-w-0">
-                        <p className="text-green-100 text-xs sm:text-sm">Occupancy Rate</p>
-                        <p className="text-lg sm:text-2xl font-bold">{reportData.occupancy_metrics.occupancy_rate}%</p>
-                        <p className="text-xs sm:text-sm text-green-100 mt-2">
-                          {reportData.occupancy_metrics.occupied_rooms}/{reportData.occupancy_metrics.total_rooms} rooms
-                        </p>
+                  {/* Expenses Section */}
+                  <div className="bg-red-50 rounded-lg p-4">
+                    <h3 className="text-lg font-semibold text-gray-900 mb-4 flex items-center">
+                      <ExclamationTriangleIcon className="h-5 w-5 mr-2 text-red-600" />
+                      Expenses
+                    </h3>
+                    <div className="space-y-3">
+                      <div className="flex justify-between items-center">
+                        <span className="text-gray-600">Electricity:</span>
+                        <span className="font-medium">{formatCurrency(reportData.financial_summary.total_electricity)}</span>
                       </div>
-                      <HomeIcon className="h-8 w-8 sm:h-12 sm:w-12 text-green-200 flex-shrink-0" />
+                      <div className="flex justify-between items-center">
+                        <span className="text-gray-600">Water:</span>
+                        <span className="font-medium">{formatCurrency(reportData.financial_summary.total_water)}</span>
+                      </div>
+                      <div className="border-t pt-2 flex justify-between items-center font-semibold">
+                        <span className="text-gray-900">Total Expenses:</span>
+                        <span className="text-red-600">{formatCurrency(reportData.financial_summary.total_expenses)}</span>
+                      </div>
                     </div>
                   </div>
 
-                  <div className="bg-gradient-to-r from-purple-500 to-purple-600 rounded-lg p-4 sm:p-6 text-white">
-                    <div className="flex items-center justify-between">
-                      <div className="flex-1 min-w-0">
-                        <p className="text-purple-100 text-xs sm:text-sm">Active Tenants</p>
-                        <p className="text-lg sm:text-2xl font-bold">{reportData.tenant_statistics.active_tenants}</p>
-                        <p className="text-xs sm:text-sm text-purple-100 mt-2">
-                          Net change: {reportData.tenant_statistics.net_tenant_change >= 0 ? '+' : ''}{reportData.tenant_statistics.net_tenant_change}
-                        </p>
-                      </div>
-                      <UsersIcon className="h-8 w-8 sm:h-12 sm:w-12 text-purple-200 flex-shrink-0" />
+                  {/* Net Income */}
+                  <div className="md:col-span-2 bg-blue-50 rounded-lg p-4">
+                    <div className="flex justify-between items-center">
+                      <h3 className="text-lg font-semibold text-gray-900">Net Income</h3>
+                      <span className="text-xl font-bold text-blue-600">
+                        {formatCurrency(reportData.financial_summary.net_income)}
+                      </span>
                     </div>
                   </div>
+                </div>
 
-                  <div className="bg-gradient-to-r from-orange-500 to-orange-600 rounded-lg p-4 sm:p-6 text-white">
-                    <div className="flex items-center justify-between">
-                      <div className="flex-1 min-w-0">
-                        <p className="text-orange-100 text-xs sm:text-sm">Collection Rate</p>
-                        <p className="text-lg sm:text-2xl font-bold">{reportData.financial_summary.collection_rate}%</p>
-                        <p className="text-xs sm:text-sm text-orange-100 mt-2 truncate">
-                          {formatCurrency(reportData.financial_summary.total_billed)} billed
-                        </p>
-                      </div>
-                      <ChartBarIcon className="h-8 w-8 sm:h-12 sm:w-12 text-orange-200 flex-shrink-0" />
-                    </div>
+                {/* Additional Financial Stats */}
+                <div className="mt-6 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                  <div className="bg-white rounded-lg border p-4">
+                    <h4 className="text-sm font-medium text-gray-500">Total Revenue</h4>
+                    <p className="mt-1 text-xl font-semibold text-gray-900">{formatCurrency(reportData.financial_summary.total_revenue)}</p>
+                  </div>
+                  <div className="bg-white rounded-lg border p-4">
+                    <h4 className="text-sm font-medium text-gray-500">Transactions</h4>
+                    <p className="mt-1 text-xl font-semibold text-gray-900">{reportData.financial_summary.total_transactions}</p>
+                  </div>
+                  <div className="bg-white rounded-lg border p-4">
+                    <h4 className="text-sm font-medium text-gray-500">Unpaid Amount</h4>
+                    <p className="mt-1 text-xl font-semibold text-gray-900">{formatCurrency(reportData.financial_summary.unpaid_amount)}</p>
+                  </div>
+                  <div className="bg-white rounded-lg border p-4">
+                    <h4 className="text-sm font-medium text-gray-500">Partial Amount</h4>
+                    <p className="mt-1 text-xl font-semibold text-gray-900">{formatCurrency(reportData.financial_summary.partial_amount)}</p>
                   </div>
                 </div>
               </div>
@@ -450,7 +550,7 @@ export default function ReportsPage() {
               {reportData.top_performers.length > 0 && (
                 <div className="bg-white rounded-lg shadow-sm p-4 sm:p-6">
                   <h3 className="text-lg sm:text-xl font-semibold text-gray-900 mb-4 sm:mb-6">
-                    <span className="hidden sm:inline">🌟 Top Paying Tenants</span>
+                    <span className="hidden sm:inline">Top Paying Tenants</span>
                     <span className="sm:hidden">Top Tenants</span>
                   </h3>
                   <div className="overflow-x-auto">

@@ -15,6 +15,22 @@ import {
 import toast, { Toaster } from 'react-hot-toast'
 import Link from 'next/link'
 
+// Helper functions
+const formatCurrency = (amount) => {
+  return `₱${parseFloat(amount || 0).toLocaleString(undefined, {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2
+  })}`
+}
+
+const formatDate = (dateString) => {
+  return new Date(dateString).toLocaleDateString('en-US', {
+    year: 'numeric',
+    month: 'short',
+    day: 'numeric'
+  })
+}
+
 export default function DashboardPage() {
   const [stats, setStats] = useState({
     totalBranches: 0,
@@ -53,6 +69,13 @@ export default function DashboardPage() {
     stats: []
   })
   const [penaltyPercentage, setPenaltyPercentage] = useState(1.00) // Will be fetched from settings
+  const [showDeleteModal, setShowDeleteModal] = useState(false)
+  const [branchToDelete, setBranchToDelete] = useState(null)
+  const [deleteLoading, setDeleteLoading] = useState(false)
+  const [renewalsNeeded, setRenewalsNeeded] = useState({
+    renewals: [],
+    summary: { total_needing_renewal: 0, immediate: 0, soon: 0 }
+  })
 
   useEffect(() => {
     fetchDashboardData()
@@ -100,6 +123,9 @@ export default function DashboardPage() {
 
       // Fetch billing reminders data
       await fetchBillingRemindersData()
+      
+      // Fetch contract renewals data
+      await fetchRenewalsData()
 
     } catch (error) {
       console.error('Error fetching dashboard data:', error)
@@ -126,6 +152,28 @@ export default function DashboardPage() {
       }
     } catch (error) {
       console.error('Error fetching billing reminders data:', error)
+    }
+  }
+
+  const fetchRenewalsData = async () => {
+    try {
+      const response = await fetch('/api/contracts/renewals-needed', {
+        headers: {
+          'Authorization': `Bearer ${localStorage.getItem('token')}`
+        }
+      })
+      
+      if (response.ok) {
+        const data = await response.json()
+        if (data.success) {
+          setRenewalsNeeded({
+            renewals: data.renewals || [],
+            summary: data.summary || { total_needing_renewal: 0, immediate: 0, soon: 0 }
+          })
+        }
+      }
+    } catch (error) {
+      console.error('Error fetching renewals data:', error)
     }
   }
 
@@ -214,7 +262,7 @@ export default function DashboardPage() {
 
       if (data.success) {
         // Show single consolidated success message
-        let message = '✅ Payment processed'
+        let message = `✅ Payment processed on ${formatDate(paymentFormData.actual_payment_date)}`
         
         // Add final bill or archiving info
         if (data.bill_paid && data.is_final_bill && data.tenant_moved_out) {
@@ -223,62 +271,14 @@ export default function DashboardPage() {
           message += ' - bill archived'
         }
         
-        // If the bill is paid, automatically send a receipt email
-        if (data.bill_paid) {
-          try {
-            const receiptResponse = await fetch('/api/payments/send-receipt', {
-              method: 'POST',
-              headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${localStorage.getItem('token')}`
-              },
-              body: JSON.stringify({ bill_id: selectedBill.id })
-            })
-            
-            const receiptData = await receiptResponse.json()
-            
-            if (receiptData.success) {
-              // Add receipt info to the success message
-              message += ' and receipt email sent to tenant'
-            } else {
-              console.error('Failed to send receipt email:', receiptData.message)
-              
-              // If the error is because the bill was archived, try with the original bill ID
-              if (receiptData.message && receiptData.message.includes('not found')) {
-                console.log('Attempting to send receipt for archived bill...')
-                
-                // Small delay to ensure archiving is complete
-                await new Promise(resolve => setTimeout(resolve, 1000))
-                
-                const retryResponse = await fetch('/api/payments/send-receipt', {
-                  method: 'POST',
-                  headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': `Bearer ${localStorage.getItem('token')}`
-                  },
-                  body: JSON.stringify({ bill_id: selectedBill.id })
-                })
-                
-                const retryData = await retryResponse.json()
-                
-                if (retryData.success) {
-                  // Add receipt info to the success message after retry
-                  message += ' and receipt email sent to tenant'
-                } else {
-                  console.error('Failed to send receipt on retry:', retryData.message)
-                  message += ' but receipt email failed to send'
-                }
-              } else {
-                message += ' but receipt email failed to send'
-              }
-            }
-          } catch (receiptError) {
-            console.error('Receipt sending error:', receiptError)
-            message += ' but receipt email failed to send'
-          }
+        // Add receipt info if available
+        if (data.receipt && data.receipt.email_sent) {
+          message += ' and receipt email sent to tenant'
+        } else if (data.receipt && !data.receipt.email_sent) {
+          message += ' but receipt email failed to send'
         }
         
-        toast.success('Payment processed')
+        toast.success(message)
         
         setShowPaymentModal(false)
         setPaymentFormData({
@@ -362,17 +362,6 @@ export default function DashboardPage() {
     }
   }, [selectedBill, paymentFormData.actual_payment_date])
 
-  const formatCurrency = (amount) => {
-    return `₱${parseFloat(amount || 0).toLocaleString('en-PH', { 
-      minimumFractionDigits: 2, 
-      maximumFractionDigits: 2 
-    })}`
-  }
-
-  const formatDate = (date) => {
-    return new Date(date).toLocaleDateString('en-PH')
-  }
-
   const statsCards = [
     {
       title: 'Total Branches',
@@ -403,6 +392,26 @@ export default function DashboardPage() {
       textColor: 'text-red-600'
     }
   ]
+
+  // Add delete branch handler
+  const handleDeleteBranch = async () => {
+    if (!branchToDelete) return
+
+    setDeleteLoading(true)
+    try {
+      const { api } = await import('../../lib/api')
+      await api.deleteBranch(branchToDelete.id)
+      toast.success('Branch deleted successfully')
+      setShowDeleteModal(false)
+      setBranchToDelete(null)
+      fetchDashboardData() // Refresh data
+    } catch (error) {
+      console.error('Error deleting branch:', error)
+      toast.error(error.message || 'Failed to delete branch')
+    } finally {
+      setDeleteLoading(false)
+    }
+  }
 
   if (loading) {
     return (
@@ -660,9 +669,40 @@ export default function DashboardPage() {
                       required
                     />
                     <p className="text-xs text-gray-500 mt-1">
-                      Date when tenant actually made the payment. Late payments (more than 10 days after billing period ends) will incur a 1% penalty fee.
+                      Date when tenant actually made the payment. You can set any date for historical data entry. Late payments (more than 10 days after billing period ends) will incur a {penaltyPercentage}% penalty fee.
                     </p>
+                    {paymentFormData.actual_payment_date && paymentFormData.actual_payment_date !== new Date().toISOString().split('T')[0] && (
+                      <div className="mt-2 p-2 bg-blue-50 border border-blue-200 rounded-md">
+                        <p className="text-xs text-blue-800">
+                          📅 Using custom payment date: {formatDate(paymentFormData.actual_payment_date)} (This will be used for all reports and calculations)
+                        </p>
+                      </div>
+                    )}
                   </div>
+
+                  {/* Penalty Fee Warning */}
+                  {(() => {
+                    const penaltyFee = calculatePenaltyFee(selectedBill, paymentFormData.actual_payment_date)
+                    if (penaltyFee > 0) {
+                      return (
+                        <div className="bg-red-50 border border-red-200 rounded-md p-3">
+                          <div className="flex">
+                            <ExclamationTriangleIcon className="h-5 w-5 text-red-400 mr-2" />
+                            <div>
+                              <h4 className="text-sm font-medium text-red-800">Late Payment Penalty</h4>
+                              <p className="text-sm text-red-700 mt-1">
+                                A {penaltyPercentage}% penalty fee of <strong>{formatCurrency(penaltyFee)}</strong> will be added to this bill for late payment.
+                              </p>
+                              <p className="text-xs text-red-600 mt-1">
+                                New total: <strong>{formatCurrency(parseFloat(selectedBill.total_amount) + penaltyFee)}</strong>
+                              </p>
+                            </div>
+                          </div>
+                        </div>
+                      )
+                    }
+                    return null
+                  })()}
 
                   {/* Notes */}
                   <div>
@@ -717,45 +757,129 @@ export default function DashboardPage() {
               </button>
             </div>
             <div className="space-y-4">
-            {branches.length > 0 ? (
-              branches.map((branch) => (
-                <div key={branch.id} className="border rounded-lg p-4">
-                  <div className="flex justify-between items-start">
-                    <div>
-                      <h4 className="font-medium text-gray-900">{branch.name}</h4>
-                      <p className="text-sm text-gray-600">{branch.address}</p>
-                      <div className="mt-2 text-xs text-gray-500">
-                        <span>Rent: ₱{branch.monthly_rent?.toLocaleString()}</span>
-                        <span className="mx-2">•</span>
-                        <span>Water: ₱{branch.water_rate}</span>
+              {branches.length > 0 ? (
+                branches.map((branch) => (
+                  <div key={branch.id} className="border rounded-lg p-4">
+                    <div className="flex justify-between items-start">
+                      <div>
+                        <h4 className="font-medium text-gray-900">{branch.name}</h4>
+                        <p className="text-sm text-gray-600">{branch.address}</p>
+                        <div className="mt-2 text-xs text-gray-500">
+                          <span>Rent: ₱{branch.monthly_rent?.toLocaleString()}</span>
+                          <span className="mx-2">•</span>
+                          <span>Water: ₱{branch.water_rate}</span>
+                        </div>
+                      </div>
+                      <div className="flex flex-col items-end">
+                        <p className="text-sm font-medium text-gray-900">
+                          {branch.occupied_rooms || 0}/{branch.total_rooms || 0} Occupied
+                        </p>
+                        <p className="text-xs text-gray-500">
+                          {branch.total_rooms ? Math.round(((branch.occupied_rooms || 0) / branch.total_rooms) * 100) : 0}% Occupancy
+                        </p>
+                        {branch.occupied_rooms === 0 && (
+                          <button
+                            onClick={() => {
+                              setBranchToDelete(branch)
+                              setShowDeleteModal(true)
+                            }}
+                            className="mt-2 inline-flex items-center px-2 py-1 text-xs font-medium text-red-700 hover:text-red-800"
+                          >
+                            Delete Branch
+                          </button>
+                        )}
                       </div>
                     </div>
-                    <div className="text-right">
-                      <p className="text-sm font-medium text-gray-900">
-                        {branch.occupied_rooms || 0}/{branch.total_rooms || 0} Occupied
-                      </p>
-                      <p className="text-xs text-gray-500">
-                        {branch.total_rooms ? Math.round(((branch.occupied_rooms || 0) / branch.total_rooms) * 100) : 0}% Occupancy
-                      </p>
+                  </div>
+                ))
+              ) : (
+                <div className="text-center py-8">
+                  <BuildingOfficeIcon className="mx-auto h-12 w-12 text-gray-400" />
+                  <h3 className="mt-2 text-sm font-medium text-gray-900">No branches</h3>
+                  <p className="mt-1 text-sm text-gray-500">Get started by creating a new branch.</p>
+                  <button
+                    onClick={() => setShowBranchModal(true)}
+                    className="mt-3 inline-flex items-center px-3 py-2 border border-transparent text-sm leading-4 font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700"
+                  >
+                    <PlusIcon className="h-4 w-4 mr-1" />
+                    Create First Branch
+                  </button>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+
+        {/* Contract Renewals Panel */}
+        <div className="mt-8 bg-white shadow rounded-lg">
+          <div className="px-4 py-5 sm:p-6">
+            <div className="flex items-center justify-between mb-4">
+              <div className="flex items-center">
+                <svg className="h-5 w-5 text-orange-500 mr-2" fill="currentColor" viewBox="0 0 20 20">
+                  <path fillRule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clipRule="evenodd" />
+                </svg>
+                <h3 className="text-lg leading-6 font-medium text-gray-900">
+                  Contract Renewals Needed
+                </h3>
+              </div>
+              <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-orange-100 text-orange-800">
+                {renewalsNeeded.summary.total_needing_renewal} tenant{renewalsNeeded.summary.total_needing_renewal !== 1 ? 's' : ''}
+              </span>
+            </div>
+            
+            {renewalsNeeded.renewals.length > 0 ? (
+              <div className="space-y-3 max-h-60 overflow-y-auto">
+                {renewalsNeeded.renewals.map((tenant) => (
+                  <div key={tenant.id} className="border rounded-lg p-3 hover:bg-gray-50">
+                    <div className="flex justify-between items-start">
+                      <div className="flex-1">
+                        <div className="flex items-center">
+                          <p className="text-sm font-medium text-gray-900">
+                            {tenant.name} - Room {tenant.room_number}
+                          </p>
+                          <span className={`ml-2 inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${
+                            tenant.renewal_urgency === 'immediate' 
+                              ? 'bg-red-100 text-red-800'
+                              : 'bg-orange-100 text-orange-800'
+                          }`}>
+                            {tenant.completed_cycles}/{tenant.contract_duration_months} cycles
+                          </span>
+                        </div>
+                        <p className="text-xs text-gray-500 mt-1">
+                          {tenant.branch_name} • Contract ends: {formatDate(tenant.contract_end_date)}
+                        </p>
+                      </div>
+                      <Link
+                        href="/tenants"
+                        className="px-3 py-1 bg-orange-600 text-white text-xs rounded hover:bg-orange-700"
+                        title="Renew Contract"
+                      >
+                        Renew
+                      </Link>
                     </div>
                   </div>
-                </div>
-              ))
+                ))}
+                
+                {renewalsNeeded.renewals.length > 5 && (
+                  <div className="mt-4 pt-4 border-t">
+                    <Link
+                      href="/tenants"
+                      className="w-full inline-flex justify-center items-center px-3 py-2 border border-transparent text-sm leading-4 font-medium rounded-md text-orange-600 bg-orange-50 hover:bg-orange-100"
+                    >
+                      View All Tenants
+                    </Link>
+                  </div>
+                )}
+              </div>
             ) : (
               <div className="text-center py-8">
-                <BuildingOfficeIcon className="mx-auto h-12 w-12 text-gray-400" />
-                <h3 className="mt-2 text-sm font-medium text-gray-900">No branches</h3>
-                <p className="mt-1 text-sm text-gray-500">Get started by creating a new branch.</p>
-                <button
-                  onClick={() => setShowBranchModal(true)}
-                  className="mt-3 inline-flex items-center px-3 py-2 border border-transparent text-sm leading-4 font-medium rounded-md text-white bg-blue-600 hover:bg-blue-700"
-                >
-                  <PlusIcon className="h-4 w-4 mr-1" />
-                  Create First Branch
-                </button>
+                <svg className="mx-auto h-12 w-12 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+                <h3 className="mt-2 text-sm font-medium text-gray-900">All contracts up to date</h3>
+                <p className="mt-1 text-sm text-gray-500">No tenants need contract renewal at this time!</p>
               </div>
             )}
-          </div>
           </div>
         </div>
 
@@ -993,6 +1117,43 @@ export default function DashboardPage() {
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* Delete Branch Confirmation Modal */}
+      {showDeleteModal && branchToDelete && (
+        <div className="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50">
+          <div className="relative top-20 mx-auto p-5 border w-96 shadow-lg rounded-md bg-white">
+            <div className="mt-3 text-center">
+              <div className="mx-auto flex items-center justify-center h-12 w-12 rounded-full bg-red-100">
+                <ExclamationTriangleIcon className="h-6 w-6 text-red-600" />
+              </div>
+              <h3 className="text-lg leading-6 font-medium text-gray-900 mt-4">Delete Branch</h3>
+              <div className="mt-2 px-7 py-3">
+                <p className="text-sm text-gray-500">
+                  Are you sure you want to delete {branchToDelete.name}? This will also delete all {branchToDelete.total_rooms} rooms in this branch. This action cannot be undone.
+                </p>
+              </div>
+              <div className="flex justify-end space-x-3 px-4 py-3">
+                <button
+                  onClick={() => {
+                    setShowDeleteModal(false)
+                    setBranchToDelete(null)
+                  }}
+                  className="px-4 py-2 bg-gray-100 hover:bg-gray-200 text-gray-800 text-sm font-medium rounded-md"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={handleDeleteBranch}
+                  disabled={deleteLoading}
+                  className="px-4 py-2 bg-red-600 hover:bg-red-700 text-white text-sm font-medium rounded-md disabled:opacity-50"
+                >
+                  {deleteLoading ? 'Deleting...' : 'Delete Branch'}
+                </button>
+              </div>
+            </div>
           </div>
         </div>
       )}

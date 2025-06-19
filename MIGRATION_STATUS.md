@@ -73,6 +73,11 @@ The J&H Apartment Management System has been **completely migrated** from Expres
 - ✅ `middleware/auth.js` - Old Express.js auth middleware
 - ✅ `views/` - All HTML template files (6 files)
 
+### **Contract System Consolidation**
+- ✅ `contracts` table - Removed unused separate contracts table
+- ✅ Contract management consolidated into `tenants` table with embedded fields
+- ✅ Simplified contract tracking using completed_cycles and contract_duration_months
+
 ### **Removed Documentation**
 - ✅ Migration guides and setup files (15+ files)
 - ✅ Old README and documentation files

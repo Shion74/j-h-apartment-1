@@ -140,22 +140,35 @@ export async function GET(request) {
               END
             )
           ) THEN 'already_billed'
-          -- Check if billing cycle has ended and it's time to send bill
+          -- Check if tenant needs billing (only in last 3 days of CURRENT billing cycle)
           WHEN t.rent_start IS NOT NULL AND (
-            -- No active bills, check against history or initial period
-            (NOT EXISTS (SELECT 1 FROM bills WHERE tenant_id = t.id) AND (
-              -- If history exists, check if we're past the last history bill period
-              (EXISTS (SELECT 1 FROM bill_history WHERE original_tenant_id = t.id)
-               AND CURRENT_DATE > (SELECT rent_to FROM bill_history WHERE original_tenant_id = t.id ORDER BY rent_to DESC LIMIT 1))
-              OR
-              -- If no history, check if first period from rent_start has ended
-              (NOT EXISTS (SELECT 1 FROM bill_history WHERE original_tenant_id = t.id)
-               AND CURRENT_DATE > (t.rent_start + INTERVAL '1 month' - INTERVAL '1 day')::date)
-            ))
-            OR
-            -- Active bills exist, check if last active cycle has ended
-            (EXISTS (SELECT 1 FROM bills WHERE tenant_id = t.id)
-             AND CURRENT_DATE > (SELECT rent_to FROM bills WHERE tenant_id = t.id ORDER BY bill_date DESC LIMIT 1))
+            -- Calculate current billing cycle end date
+            CASE 
+              -- If no active bills, check if we're in first billing cycle
+              WHEN NOT EXISTS (SELECT 1 FROM bills WHERE tenant_id = t.id) THEN
+                CASE
+                  -- If history exists, we're continuing from where history left off
+                  WHEN EXISTS (SELECT 1 FROM bill_history WHERE original_tenant_id = t.id) THEN
+                    -- Current cycle ends at: last_history_end + 1 month
+                    CURRENT_DATE >= (SELECT rent_to + INTERVAL '1 day' + INTERVAL '1 month' - INTERVAL '1 day' - INTERVAL '3 days' 
+                                   FROM bill_history 
+                                   WHERE original_tenant_id = t.id 
+                                   ORDER BY rent_to DESC 
+                                   LIMIT 1)
+                  -- No history, this is truly the first cycle
+                  ELSE 
+                    -- Current cycle ends at: rent_start + 1 month - 1 day
+                    CURRENT_DATE >= (t.rent_start + INTERVAL '1 month' - INTERVAL '1 day' - INTERVAL '3 days')::date
+                END
+              -- Active bills exist, we're in the cycle that starts after the last bill
+              ELSE 
+                -- Current cycle ends at: last_bill_end + 1 month  
+                CURRENT_DATE >= (SELECT rent_to + INTERVAL '1 day' + INTERVAL '1 month' - INTERVAL '1 day' - INTERVAL '3 days' 
+                               FROM bills 
+                               WHERE tenant_id = t.id 
+                               ORDER BY bill_date DESC 
+                               LIMIT 1)
+            END
           ) THEN 'needs_billing'
           ELSE 'up_to_date'
         END as billing_status,

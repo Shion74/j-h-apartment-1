@@ -19,13 +19,13 @@ export async function GET(request) {
     const occupiedRoomsResult = await pool.query('SELECT COUNT(*) as count FROM rooms WHERE status = $1', ['occupied'])
     const tenantsResult = await pool.query('SELECT COUNT(*) as count FROM tenants WHERE contract_status = $1', ['active'])
     
-    // Calculate monthly revenue (current month paid bills, including archived)
+    // Calculate monthly revenue (current month paid bills, including archived, using actual payment dates)
     const currentMonth = new Date().toISOString().slice(0, 7) // YYYY-MM format
     const revenueResult = await pool.query(`
       WITH all_payments AS (
-        SELECT amount, payment_date FROM payments
+        SELECT amount, COALESCE(actual_payment_date, payment_date) as payment_date FROM payments
         UNION ALL
-        SELECT amount, payment_date FROM payment_history
+        SELECT amount, COALESCE(actual_payment_date, payment_date) as payment_date FROM payment_history
       )
       SELECT COALESCE(SUM(amount), 0) as revenue
       FROM all_payments

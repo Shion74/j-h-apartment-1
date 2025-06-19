@@ -10,6 +10,7 @@ export default function LoginPage() {
     password: ''
   })
   const [isLoading, setIsLoading] = useState(false)
+  const [showPassword, setShowPassword] = useState(false)
   const router = useRouter()
 
   useEffect(() => {
@@ -64,20 +65,20 @@ export default function LoginPage() {
       <Toaster position="top-center" />
       <div className="min-h-screen flex">
         {/* Left Side - Login Form */}
-        <div className="flex-1 flex items-center justify-center bg-white px-4 sm:px-6 lg:px-20 xl:px-24">
-          <div className="w-full max-w-sm mx-auto">
+        <div className="flex-1 flex items-center justify-center px-8 lg:px-12 bg-white">
+          <div className="w-full max-w-sm">
             {/* Header */}
-            <div className="text-center mb-8">
-              <h1 className="text-3xl font-bold text-gray-900 mb-2">
+            <div className="mb-6">
+              <h1 className="text-2xl font-bold text-gray-900 mb-2">
                 Welcome Back
               </h1>
-              <p className="text-gray-600">
-                Enter your username and password to sign in
+              <p className="text-gray-600 text-sm">
+                Sign in to your apartment management account
               </p>
             </div>
 
             {/* Login Form */}
-            <form className="space-y-6" onSubmit={handleSubmit}>
+            <form onSubmit={handleSubmit} className="space-y-5">
               <div>
                 <label htmlFor="username" className="block text-sm font-medium text-gray-700 mb-1">
                   Username
@@ -87,8 +88,8 @@ export default function LoginPage() {
                   name="username"
                   type="text"
                   required
-                  className="w-full px-3 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-primary-500 transition-colors"
-                  placeholder="Your username"
+                  className="w-full px-3 py-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all duration-200 text-gray-900 placeholder-gray-500"
+                  placeholder="Enter your username"
                   value={formData.username}
                   onChange={handleInputChange}
                 />
@@ -98,89 +99,130 @@ export default function LoginPage() {
                 <label htmlFor="password" className="block text-sm font-medium text-gray-700 mb-1">
                   Password
                 </label>
-                <input
-                  id="password"
-                  name="password"
-                  type="password"
-                  required
-                  className="w-full px-3 py-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-primary-500 transition-colors"
-                  placeholder="Your password"
-                  value={formData.password}
-                  onChange={handleInputChange}
-                />
-              </div>
-
-              <div className="pt-2">
-                <button
-                  type="submit"
-                  disabled={isLoading}
-                  className="w-full flex justify-center py-3 px-4 border border-transparent rounded-lg text-sm font-medium text-white bg-primary-600 hover:bg-primary-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-primary-500 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-                >
-                  {isLoading ? (
-                    <div className="flex items-center">
-                      <svg className="animate-spin -ml-1 mr-3 h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
-                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
-                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                <div className="relative">
+                  <input
+                    id="password"
+                    name="password"
+                    type={showPassword ? 'text' : 'password'}
+                    required
+                    className="w-full px-3 py-3 pr-10 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all duration-200 text-gray-900 placeholder-gray-500"
+                    placeholder="Enter your password"
+                    value={formData.password}
+                    onChange={handleInputChange}
+                  />
+                  <button
+                    type="button"
+                    className="absolute inset-y-0 right-0 pr-3 flex items-center"
+                    onClick={() => setShowPassword(!showPassword)}
+                  >
+                    {showPassword ? (
+                      <svg className="h-5 w-5 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.543-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M9.878 9.878l4.242 4.242M9.878 9.878L3 3m6.878 6.878L21 21" />
                       </svg>
-                      Signing in...
-                    </div>
-                  ) : (
-                    'SIGN IN'
-                  )}
-                </button>
+                    ) : (
+                      <svg className="h-5 w-5 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+                      </svg>
+                    )}
+                  </button>
+                </div>
               </div>
-            </form>
 
-            {/* Default Credentials Info */}
-            <div className="mt-8 p-4 bg-gray-50 rounded-lg border">
-              <p className="text-xs text-gray-600 text-center">
-                <strong>Default Credentials:</strong><br />
-                Username: admin<br />
-                Password: admin123
-              </p>
-            </div>
+              <button
+                type="submit"
+                disabled={isLoading}
+                className="w-full bg-blue-600 text-white py-3 px-4 rounded-lg font-medium hover:bg-blue-700 focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 transition-all duration-200 disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {isLoading ? (
+                  <div className="flex items-center justify-center">
+                    <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-white mr-2"></div>
+                    Signing in...
+                  </div>
+                ) : (
+                  'Sign In'
+                )}
+              </button>
+            </form>
           </div>
         </div>
 
-        {/* Right Side - Branding */}
-        <div className="flex-1 bg-gradient-to-br from-primary-500 via-primary-600 to-primary-700 flex items-center justify-center relative overflow-hidden">
-          {/* Background Pattern */}
-          <div className="absolute inset-0 bg-gradient-to-br from-primary-400/20 via-transparent to-primary-800/20"></div>
-          <div className="absolute inset-0 opacity-30">
-            <div className="w-full h-full bg-repeat bg-[length:60px_60px]" style={{
-              backgroundImage: `url("data:image/svg+xml,%3Csvg width='60' height='60' viewBox='0 0 60 60' xmlns='http://www.w3.org/2000/svg'%3E%3Cg fill='none' fill-rule='evenodd'%3E%3Cg fill='%23ffffff' fill-opacity='0.05'%3E%3Cpath d='M36 34v-4h-2v4h-4v2h4v4h2v-4h4v-2h-4zm0-30V0h-2v4h-4v2h4v4h2V6h4V4h-4zM6 34v-4H4v4H0v2h4v4h2v-4h4v-2H6zM6 4V0H4v4H0v2h4v4h2V6h4V4H6z'/%3E%3C/g%3E%3C/g%3E%3C/svg%3E")`
-            }}>
-            </div>
-          </div>
-          
-          {/* Logo and Text */}
-          <div className="relative z-10 text-center text-white">
-            {/* J&H Logo */}
-            <div className="mb-8">
-              <div className="inline-flex items-center justify-center w-20 h-20 rounded-2xl bg-white/20 backdrop-blur-sm border border-white/30 mb-6">
-                <svg className="w-12 h-12 text-white" fill="currentColor" viewBox="0 0 24 24">
-                  <path d="M10 20v-6h4v6h5v-8h3L12 3 2 12h3v8z"/>
-                </svg>
+        {/* Right Side - Promotional Content */}
+        <div className="hidden lg:flex lg:flex-1 bg-gradient-to-br from-blue-500 via-blue-600 to-blue-700 text-white">
+          <div className="flex flex-col justify-center px-8 py-6 w-full">
+            {/* Logo/Brand */}
+            <div className="text-center mb-6">
+              <div className="flex items-center justify-center mb-3">
+                <img 
+                  src="/JH LOGO WHITE.svg"
+                  alt="J&H Apartment Logo"
+                  className="h-22 w-auto object-contain"
+                />
               </div>
-              <div className="space-y-2">
-                <h1 className="text-4xl font-bold tracking-wider">
-                  J & H
-                </h1>
-                <h2 className="text-xl font-light tracking-widest opacity-90">
-                  APARTMENT
-                </h2>
-                <div className="w-16 h-0.5 bg-white/60 mx-auto mt-4"></div>
-                <p className="text-sm opacity-75 mt-4 max-w-xs mx-auto leading-relaxed">
-                  Professional apartment management system for modern living
-                </p>
-              </div>
+              <h2 className="text-3xl font-bold leading-tight mb-2">
+                Professional Apartment<br />
+                <span className="text-blue-100">Management System</span>
+              </h2>
+              <p className="text-blue-100 leading-relaxed text-sm">
+                Streamline your property management with our comprehensive platform designed for modern apartment operations.
+              </p>
             </div>
-          </div>
 
-          {/* Decorative Elements */}
-          <div className="absolute top-10 right-10 w-20 h-20 rounded-full bg-white/10 blur-xl"></div>
-          <div className="absolute bottom-10 left-10 w-32 h-32 rounded-full bg-white/5 blur-2xl"></div>
-          <div className="absolute top-1/2 right-0 w-40 h-40 rounded-full bg-white/5 blur-3xl transform translate-x-1/2"></div>
+            {/* Features */}
+            <div className="space-y-3 mb-6">
+              <div className="flex items-center">
+                <div className="w-10 h-10 bg-white bg-opacity-20 rounded-lg flex items-center justify-center mr-3">
+                  <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                  </svg>
+                </div>
+                <div>
+                  <h3 className="font-semibold">Automated Billing</h3>
+                  <p className="text-blue-100 text-sm">Generate bills, track payments, and manage deposits automatically</p>
+                </div>
+              </div>
+
+              <div className="flex items-center">
+                <div className="w-10 h-10 bg-white bg-opacity-20 rounded-lg flex items-center justify-center mr-3">
+                  <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" />
+                  </svg>
+                </div>
+                <div>
+                  <h3 className="font-semibold">Tenant Management</h3>
+                  <p className="text-blue-100 text-sm">Comprehensive tenant profiles with contract and payment history</p>
+                </div>
+              </div>
+
+              <div className="flex items-center">
+                <div className="w-10 h-10 bg-white bg-opacity-20 rounded-lg flex items-center justify-center mr-3">
+                  <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
+                  </svg>
+                </div>
+                <div>
+                  <h3 className="font-semibold">Smart Analytics</h3>
+                  <p className="text-blue-100 text-sm">Real-time insights and detailed financial reporting</p>
+                </div>
+              </div>
+            </div>
+
+            {/* Stats */}
+            <div className="grid grid-cols-3 gap-6 text-center">
+              <div>
+                <div className="text-2xl font-bold">24/7</div>
+                <div className="text-blue-100 text-xs">System Access</div>
+              </div>
+              <div>
+                <div className="text-2xl font-bold">100%</div>
+                <div className="text-blue-100 text-xs">Automated</div>
+              </div>
+              <div>
+                <div className="text-2xl font-bold">4.9★</div>
+                <div className="text-blue-100 text-xs">Efficiency</div>
+              </div>
+            </div>
+          </div>
         </div>
       </div>
     </>

@@ -16,12 +16,12 @@ export async function GET(request) {
     // Get current month
     const currentMonth = new Date().toISOString().slice(0, 7) // YYYY-MM
 
-    // Calculate statistics (including archived payments)
+    // Calculate statistics (including archived payments, using actual payment dates)
     const monthlyStatsResult = await pool.query(`
       WITH all_payments AS (
-        SELECT amount, payment_date FROM payments
+        SELECT amount, COALESCE(actual_payment_date, payment_date) as payment_date FROM payments
         UNION ALL
-        SELECT amount, payment_date FROM payment_history
+        SELECT amount, COALESCE(actual_payment_date, payment_date) as payment_date FROM payment_history
       )
       SELECT 
         COALESCE(SUM(amount), 0) as monthly_collected,

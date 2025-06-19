@@ -234,13 +234,23 @@ export async function POST(request) {
 
     // Create the bill - store readings exactly as provided
     const result = await pool.query(`
+      WITH bill_dates AS (
+        SELECT 
+          $4::date as rent_to_date,
+          ($4::date + INTERVAL '10 days')::date as due_date
+      )
       INSERT INTO bills (
         tenant_id, room_id, bill_date, rent_from, rent_to, rent_amount,
         electric_previous_reading, electric_present_reading, electric_consumption,
         electric_rate_per_kwh, electric_amount, water_amount,
         extra_fee_amount, extra_fee_description, total_amount, status,
-        is_final_bill, move_out_reason, notes, deposit_applied, original_bill_amount
-      ) VALUES ($1, $2, CURRENT_DATE, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, 'unpaid', $15, $16, $17, $18, $19)
+        is_final_bill, move_out_reason, notes, deposit_applied, original_bill_amount,
+        electric_reading_date, due_date
+      ) 
+      SELECT
+        $1, $2, CURRENT_DATE, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, 'unpaid', $15, $16, $17, $18, $19,
+        CURRENT_DATE, bill_dates.due_date
+      FROM bill_dates
       RETURNING id
     `, [
       tenant_id, room_id, rent_from, rent_to, rent_amount,

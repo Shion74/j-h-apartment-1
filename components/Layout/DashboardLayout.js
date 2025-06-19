@@ -20,9 +20,9 @@ import {
 const navigation = [
   { name: 'Dashboard', href: '/dashboard', icon: HomeIcon },
   { name: 'Manage Tenants', href: '/tenants', icon: UsersIcon },
-  { name: 'Billing', href: '/billing', icon: DocumentTextIcon },
-  { name: 'Payment History', href: '/history', icon: ClockIcon },
   { name: 'Rooms', href: '/rooms', icon: BuildingOfficeIcon },
+  { name: 'Billing', href: '/billing', icon: DocumentTextIcon },
+  { name: 'History', href: '/history', icon: ClockIcon },
   { name: 'Reports', href: '/reports', icon: ChartBarIcon },
   { name: 'Settings', href: '/settings', icon: CogIcon },
 ]

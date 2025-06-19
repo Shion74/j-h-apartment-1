@@ -846,11 +846,22 @@ export default function TenantsPage() {
                         {tenant.contract_status || 'inactive'}
                       </span>
                       
-                      {/* Billing Cycle Progress - Only show cycle count, no percentage */}
+                                              {/* Billing Cycle Progress with inline renewal indicator */}
                       {(tenant.contract_status === 'active' || tenant.contract_status === 'renewed') && (
-                        <div className="text-right">
+                          <div className="text-left">
+                            <div className="flex items-center justify-start space-x-2">
+                              {/* Renewal Indicator - Show when tenant is in their final month */}
+                              {(tenant.completed_cycles || 0) >= ((tenant.contract_duration_months || 6) - 1) && (
+                                <span className="inline-flex items-center px-1.5 py-0.5 rounded text-xs font-medium bg-orange-100 text-orange-800 border border-orange-200">
+                                  <svg className="w-2.5 h-2.5 mr-1" fill="currentColor" viewBox="0 0 20 20">
+                                    <path fillRule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clipRule="evenodd" />
+                                  </svg>
+                                  Renewal Due
+                                </span>
+                              )}
                           <div className="text-xs font-medium text-gray-900">
                             {tenant.completed_cycles || 0}/{tenant.contract_duration_months || 6} cycles
+                              </div>
                           </div>
                         </div>
                       )}

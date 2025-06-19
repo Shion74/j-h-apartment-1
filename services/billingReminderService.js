@@ -28,15 +28,15 @@ class BillingReminderService {
       const today = new Date().toISOString().split('T')[0]
       const billsToRemind = []
 
-      for (const bill of billsNeedingReminders) {
-        // Check if reminder was already sent today for this bill
-        const [existingReminder] = await pool.execute(`
+      for (const tenant of billsNeedingReminders) {
+        // Check if reminder was already sent today for this tenant
+        const existingReminderResult = await pool.query(`
           SELECT id FROM billing_reminders 
-          WHERE bill_id = ? AND reminder_date = ?
-        `, [bill.id, today])
+          WHERE tenant_id = $1 AND reminder_date = $2
+        `, [tenant.tenant_id, today])
 
-        if (existingReminder.length === 0) {
-          billsToRemind.push(bill)
+        if (existingReminderResult.rows.length === 0) {
+          billsToRemind.push(tenant)
         }
       }
 
@@ -50,7 +50,7 @@ class BillingReminderService {
         }
       }
 
-      console.log(`📧 Sending reminder for ${billsToRemind.length} bills`)
+      console.log(`📧 Sending reminder for ${billsToRemind.length} tenants`)
 
       // Send email reminder to management
       const emailResult = await emailService.sendBillingReminderToManagement(billsToRemind)
@@ -60,52 +60,52 @@ class BillingReminderService {
 
       if (emailResult.success) {
         // Record reminders in database
-        for (const bill of billsToRemind) {
+        for (const tenant of billsToRemind) {
           try {
-            await pool.execute(`
+            await pool.query(`
               INSERT INTO billing_reminders 
-              (bill_id, reminder_date, days_before_due, email_sent, email_sent_at) 
-              VALUES (?, ?, ?, TRUE, NOW())
-            `, [bill.id, today, bill.days_until_due])
+              (tenant_id, reminder_date, days_before_due, email_sent, email_sent_at) 
+              VALUES ($1, $2, $3, TRUE, NOW())
+            `, [tenant.tenant_id, today, tenant.days_until_due])
 
             // Also log in email_notifications table
-            await pool.execute(`
+            await pool.query(`
               INSERT INTO email_notifications 
               (tenant_id, email_type, email_subject, recipient_email, status, sent_at) 
-              VALUES (?, 'billing_reminder', ?, 'official.jhapartment@gmail.com', 'sent', NOW())
-            `, [bill.tenant_id, `Billing Reminder - ${bill.tenant_name} - Room ${bill.room_number}`])
+              VALUES ($1, 'billing_reminder', $2, 'official.jhapartment@gmail.com', 'sent', NOW())
+            `, [tenant.tenant_id, `Billing Reminder - ${tenant.tenant_name} - Room ${tenant.room_number}`])
 
             remindersSent++
           } catch (error) {
-            console.error(`❌ Failed to record reminder for bill ${bill.id}:`, error)
+            console.error(`❌ Failed to record reminder for tenant ${tenant.tenant_id}:`, error)
             errors.push({
-              bill_id: bill.id,
-              tenant_name: bill.tenant_name,
+              tenant_id: tenant.tenant_id,
+              tenant_name: tenant.tenant_name,
               error: error.message
             })
           }
         }
 
-        console.log(`✅ Successfully sent billing reminder email with ${remindersSent} bills`)
+        console.log(`✅ Successfully sent billing reminder email with ${remindersSent} tenants`)
       } else {
         console.error('❌ Failed to send billing reminder email:', emailResult.error)
         
         // Record failed attempts
-        for (const bill of billsToRemind) {
+        for (const tenant of billsToRemind) {
           try {
-            await pool.execute(`
+            await pool.query(`
               INSERT INTO billing_reminders 
-              (bill_id, reminder_date, days_before_due, email_sent, email_sent_at) 
-              VALUES (?, ?, ?, FALSE, NULL)
-            `, [bill.id, today, bill.days_until_due])
+              (tenant_id, reminder_date, days_before_due, email_sent, email_sent_at) 
+              VALUES ($1, $2, $3, FALSE, NULL)
+            `, [tenant.tenant_id, today, tenant.days_until_due])
 
-            await pool.execute(`
+            await pool.query(`
               INSERT INTO email_notifications 
               (tenant_id, email_type, email_subject, recipient_email, status, error_message) 
-              VALUES (?, 'billing_reminder', ?, 'official.jhapartment@gmail.com', 'failed', ?)
-            `, [bill.tenant_id, `Billing Reminder - ${bill.tenant_name} - Room ${bill.room_number}`, emailResult.error])
+              VALUES ($1, 'billing_reminder', $2, 'official.jhapartment@gmail.com', 'failed', $3)
+            `, [tenant.tenant_id, `Billing Reminder - ${tenant.tenant_name} - Room ${tenant.room_number}`, emailResult.error])
           } catch (recordError) {
-            console.error(`❌ Failed to record failed reminder for bill ${bill.id}:`, recordError)
+            console.error(`❌ Failed to record failed reminder for tenant ${tenant.tenant_id}:`, recordError)
           }
         }
       }
@@ -113,7 +113,7 @@ class BillingReminderService {
       return {
         success: true,
         message: emailResult.success ? 
-          `Billing reminder sent successfully for ${remindersSent} bills` : 
+          `Billing reminder sent successfully for ${remindersSent} tenants` : 
           `Failed to send billing reminder: ${emailResult.error}`,
         bills_processed: billsNeedingReminders.length,
         bills_to_remind: billsToRemind.length,
@@ -135,21 +135,21 @@ class BillingReminderService {
   // Get reminder statistics
   static async getReminderStats(days = 30) {
     try {
-      const [stats] = await pool.execute(`
+      const statsResult = await pool.query(`
         SELECT 
           DATE(reminder_date) as date,
           COUNT(*) as total_reminders,
           SUM(CASE WHEN email_sent = TRUE THEN 1 ELSE 0 END) as successful_reminders,
           SUM(CASE WHEN email_sent = FALSE THEN 1 ELSE 0 END) as failed_reminders
         FROM billing_reminders 
-        WHERE reminder_date >= DATE_SUB(CURDATE(), INTERVAL ? DAY)
+        WHERE reminder_date >= CURRENT_DATE - INTERVAL '${days} days'
         GROUP BY DATE(reminder_date)
         ORDER BY reminder_date DESC
-      `, [days])
+      `)
 
       return {
         success: true,
-        stats
+        stats: statsResult.rows
       }
     } catch (error) {
       console.error('❌ Error getting reminder stats:', error)
@@ -163,17 +163,17 @@ class BillingReminderService {
   // Clean up old reminder records (older than 90 days)
   static async cleanupOldReminders() {
     try {
-      const [result] = await pool.execute(`
+      const result = await pool.query(`
         DELETE FROM billing_reminders 
-        WHERE reminder_date < DATE_SUB(CURDATE(), INTERVAL 90 DAY)
+        WHERE reminder_date < CURRENT_DATE - INTERVAL '90 days'
       `)
 
-      console.log(`🧹 Cleaned up ${result.affectedRows} old reminder records`)
+      console.log(`🧹 Cleaned up ${result.rowCount} old reminder records`)
       
       return {
         success: true,
-        message: `Cleaned up ${result.affectedRows} old reminder records`,
-        deleted_count: result.affectedRows
+        message: `Cleaned up ${result.rowCount} old reminder records`,
+        deleted_count: result.rowCount
       }
     } catch (error) {
       console.error('❌ Error cleaning up old reminders:', error)

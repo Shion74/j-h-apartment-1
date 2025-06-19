@@ -1,0 +1,50 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+# System Configuration Guide
+
+## Global Settings
+Managed through [app/api/settings/route.js](mdc:app/api/settings/route.js):
+1. Electricity Rate
+   - Default: ₱11.00 per kWh
+   - Configurable per branch
+   - Stored in bills for historical accuracy
+
+2. Penalty Fee
+   - Default: 1.00%
+   - Applied after 10-day grace period
+   - Calculated from total bill amount
+
+3. Water Rate
+   - Fixed monthly charge
+   - Configurable per branch
+
+## Branch Configuration
+- Each branch can override global rates
+- Branch-specific room numbering
+- Independent billing cycles
+
+## Email Configuration
+Managed through [app/api/settings/email/route.js](mdc:app/api/settings/email/route.js):
+- SMTP settings
+- Email templates
+- Receipt formatting
+- Notification rules
+
+## Rate Priority
+1. Bill's stored rate (for historical accuracy)
+2. Branch-specific rate
+3. Global system rate
+4. Default fallback values
+
+## Configuration Rules
+1. All rate changes are forward-looking
+2. Historical bills maintain original rates
+3. Branch settings override global settings
+4. Email configuration requires testing before saving
+5. All monetary inputs must handle empty strings properly
+
+
+

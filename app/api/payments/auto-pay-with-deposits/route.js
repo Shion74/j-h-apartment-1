@@ -160,6 +160,17 @@ export async function POST(request) {
       let billArchived = false
       
       if (isFullyPaid) {
+        // Get the actual payment date from the most recent payment
+        const actualPaymentDateResult = await pool.query(`
+          SELECT COALESCE(actual_payment_date, payment_date) as actual_payment_date
+          FROM payments 
+          WHERE bill_id = $1 
+          ORDER BY created_at DESC 
+          LIMIT 1
+        `, [bill_id])
+        
+        const actualPaymentDate = actualPaymentDateResult.rows[0]?.actual_payment_date || new Date().toISOString().split('T')[0]
+
         if (bill.is_final_bill) {
           // Archive bill to bill_history
           await pool.query(`
@@ -170,7 +181,7 @@ export async function POST(request) {
               water_amount, extra_fee_amount, extra_fee_description, total_amount,
               bill_date, due_date, status, prepared_by, is_final_bill,
               total_paid, remaining_balance, penalty_fee_amount, penalty_applied,
-              move_out_reason, move_out_notes, payment_method, created_at, updated_at, archived_at
+              move_out_reason, move_out_notes, payment_method, actual_payment_date, created_at, updated_at, archived_at
             )
             SELECT 
               id, tenant_id, $1, room_id, 
@@ -180,9 +191,9 @@ export async function POST(request) {
               water_amount, extra_fee_amount, extra_fee_description, total_amount,
               bill_date, due_date, status, prepared_by, is_final_bill,
               total_paid, remaining_balance, penalty_fee_amount, penalty_applied,
-              move_out_reason, move_out_notes, 'advance_payment', created_at, updated_at, NOW()
+              move_out_reason, move_out_notes, 'advance_payment', $3, created_at, updated_at, NOW()
             FROM bills WHERE id = $2
-          `, [bill.tenant_name, bill_id])
+          `, [bill.tenant_name, bill_id, actualPaymentDate])
 
           // Move tenant to tenant_history
           await pool.query(`
@@ -249,7 +260,7 @@ export async function POST(request) {
               water_amount, extra_fee_amount, extra_fee_description, total_amount,
               bill_date, due_date, status, prepared_by, is_final_bill,
               total_paid, remaining_balance, penalty_fee_amount, penalty_applied,
-              payment_method, created_at, updated_at, archived_at
+              payment_method, actual_payment_date, created_at, updated_at, archived_at
             )
             SELECT 
               id, tenant_id, $1, room_id,
@@ -259,9 +270,9 @@ export async function POST(request) {
               water_amount, extra_fee_amount, extra_fee_description, total_amount,
               bill_date, due_date, status, prepared_by, is_final_bill,
               total_paid, remaining_balance, penalty_fee_amount, penalty_applied,
-              'advance_payment', created_at, updated_at, NOW()
+              'advance_payment', $3, created_at, updated_at, NOW()
             FROM bills WHERE id = $2
-          `, [bill.tenant_name, bill_id])
+          `, [bill.tenant_name, bill_id, actualPaymentDate])
 
           // Archive payments to payment_history for regular bills too
           await pool.query(`

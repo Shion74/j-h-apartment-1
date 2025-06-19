@@ -85,6 +85,17 @@ export async function POST(request) {
         WHERE id = $1
       `, [bill_id])
 
+      // Get the actual payment date from the most recent payment (if any)
+      const actualPaymentDateResult = await pool.query(`
+        SELECT COALESCE(actual_payment_date, payment_date) as actual_payment_date
+        FROM payments 
+        WHERE bill_id = $1 
+        ORDER BY created_at DESC 
+        LIMIT 1
+      `, [bill_id])
+      
+      const actualPaymentDate = actualPaymentDateResult.rows[0]?.actual_payment_date || new Date().toISOString().split('T')[0]
+
       // Archive the bill with proper rent_amount handling
       await pool.query(`
         INSERT INTO bill_history (
@@ -93,25 +104,27 @@ export async function POST(request) {
           electric_present_reading, electric_consumption, electric_rate_per_kwh, electric_amount,
           water_amount, extra_fee_amount, extra_fee_description,
           total_amount, status, prepared_by, is_final_bill, is_refund_bill,
-          refund_reason, payment_date, total_paid, remaining_balance,
+          refund_reason, payment_date, actual_payment_date, total_paid, remaining_balance,
           tenant_name, room_number, branch_name, archived_by, archive_reason,
-          deposit_applied, original_bill_amount, payment_method
+          deposit_applied, original_bill_amount, payment_method, electric_reading_date,
+          due_date
         )
         SELECT 
           b.id, b.tenant_id, b.room_id, b.bill_date,
-          b.rent_from, b.rent_to, COALESCE(b.rent_amount, 0), COALESCE(b.electric_previous_reading, 0),
-          COALESCE(b.electric_present_reading, 0), COALESCE(b.electric_consumption, 0), COALESCE(b.electric_rate_per_kwh, 11.00), COALESCE(b.electric_amount, 0),
-          COALESCE(b.water_amount, 0), COALESCE(b.extra_fee_amount, 0), b.extra_fee_description,
-          b.total_amount, 'paid', b.prepared_by, COALESCE(b.is_final_bill, false), COALESCE(b.is_refund_bill, false),
-          b.refund_reason, CURRENT_DATE, b.total_amount, 0,
-          t.name, r.room_number, br.name, 'System', 'Refund completed',
-          COALESCE(b.deposit_applied, 0), COALESCE(b.original_bill_amount, b.total_amount), 'advance_payment'
+          b.rent_from, b.rent_to, b.rent_amount, b.electric_previous_reading,
+          b.electric_present_reading, b.electric_consumption, b.electric_rate_per_kwh, b.electric_amount,
+          b.water_amount, b.extra_fee_amount, b.extra_fee_description,
+          b.total_amount, 'refund', $1, b.is_final_bill, true,
+          $2, CURRENT_DATE, $4, b.total_amount, 0,
+          t.name, r.room_number, br.name, $1, 'refund_completed',
+          b.deposit_applied, b.original_bill_amount, 'refund', b.electric_reading_date,
+          b.due_date
         FROM bills b
-        JOIN tenants t ON b.tenant_id = t.id
-        JOIN rooms r ON b.room_id = r.id
-        JOIN branches br ON r.branch_id = br.id
-        WHERE b.id = $1
-      `, [bill_id])
+        LEFT JOIN tenants t ON b.tenant_id = t.id
+        LEFT JOIN rooms r ON b.room_id = r.id
+        LEFT JOIN branches br ON r.branch_id = br.id
+        WHERE b.id = $3
+      `, [prepared_by, refund_reason, bill_id, actualPaymentDate])
 
       // Archive any payments to payment_history before deleting the bill
       await pool.query(`

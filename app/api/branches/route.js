@@ -276,37 +276,54 @@ export async function DELETE(request) {
       )
     }
 
-    // Check if branch has rooms
-    const roomsResult = await pool.query(
-      'SELECT COUNT(*) as room_count FROM rooms WHERE branch_id = $1',
-      [id]
+    // Check if branch exists and has occupied rooms
+    const occupiedRoomsResult = await pool.query(
+      'SELECT COUNT(*) as occupied_count FROM rooms WHERE branch_id = $1 AND status = $2',
+      [id, 'occupied']
     )
 
-    const rooms = roomsResult.rows
-    if (rooms[0].room_count > 0) {
+    if (occupiedRoomsResult.rows[0].occupied_count > 0) {
       return NextResponse.json(
-        { success: false, message: 'Cannot delete branch with existing rooms' },
+        { success: false, message: 'Cannot delete branch with occupied rooms' },
         { status: 400 }
       )
     }
 
-    // Delete branch
-    const deleteResult = await pool.query(
-      'DELETE FROM branches WHERE id = $1',
-      [id]
-    )
+    // Start transaction
+    await pool.query('BEGIN')
 
-    if (deleteResult.rowCount === 0) {
-      return NextResponse.json(
-        { success: false, message: 'Branch not found' },
-        { status: 404 }
+    try {
+      // Delete all rooms in the branch
+      await pool.query(
+        'DELETE FROM rooms WHERE branch_id = $1',
+        [id]
       )
-    }
 
-    return NextResponse.json({
-      success: true,
-      message: 'Branch deleted successfully'
-    })
+      // Delete the branch
+      const deleteResult = await pool.query(
+        'DELETE FROM branches WHERE id = $1',
+        [id]
+      )
+
+      if (deleteResult.rowCount === 0) {
+        await pool.query('ROLLBACK')
+        return NextResponse.json(
+          { success: false, message: 'Branch not found' },
+          { status: 404 }
+        )
+      }
+
+      await pool.query('COMMIT')
+
+      return NextResponse.json({
+        success: true,
+        message: 'Branch and all its rooms deleted successfully'
+      })
+
+    } catch (error) {
+      await pool.query('ROLLBACK')
+      throw error
+    }
 
   } catch (error) {
     console.error('Delete branch error:', error)

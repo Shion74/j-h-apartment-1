@@ -1,0 +1,45 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+# Reporting System Architecture
+
+## Monthly Reports
+Monthly financial reports are based on:
+1. Billing cycles ending in the month
+2. Payments received during the month
+3. Separate income/expense tracking
+
+## Key Components
+- [app/api/reports/monthly/route.js](mdc:app/api/reports/monthly/route.js) - Monthly report generation
+- [app/api/dashboard/stats/route.js](mdc:app/api/dashboard/stats/route.js) - Dashboard statistics
+- [app/api/payments/stats/route.js](mdc:app/api/payments/stats/route.js) - Payment analytics
+
+## Data Sources
+Reports combine data from:
+- Active bills and bill_history
+- Active payments and payment_history
+- Tenant records (active and archived)
+- Contract information
+
+## Financial Categories
+1. Income
+   - Room rental revenue
+   - Extra fees collected
+   
+2. Expenses
+   - Electricity charges
+   - Water fees
+
+3. Net Income
+   - Total Income - Total Expenses
+
+## Report Generation Rules
+1. Reports auto-update when month changes
+2. All calculations use tenant billing cycles
+3. Revenue is based on payment dates
+4. Bills are counted based on rent_to dates
+5. All monetary values must be properly parsed as floats
+6. Totals must include both active and archived records
+

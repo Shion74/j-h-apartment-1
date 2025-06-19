@@ -1,0 +1,46 @@
+---
+description:
+globs:
+alwaysApply: false
+---
+# Contract Management System
+
+## Overview
+Contracts are managed directly within the `tenants` table using embedded contract fields. There is no separate contracts table - all contract information is stored alongside tenant data.
+
+## Contract Fields in Tenants Table
+- `contract_start_date` - When the contract begins (usually same as rent_start)
+- `contract_end_date` - When the contract expires
+- `contract_duration_months` - Total contract length in months (default: 6)
+- `contract_status` - Current contract state
+- `completed_cycles` - Number of paid billing cycles completed
+
+## Contract Status Values
+- `active` - Contract is currently valid and tenant is paying
+- `renewed` - Contract has been extended/renewed
+- `expired` - Contract end date has passed
+- `terminated` - Contract ended early (move-out, violation, etc.)
+
+## Key Files
+- [app/api/contracts/renew/[tenantId]/route.js](mdc:app/api/contracts/renew/[tenantId]/route.js) - Contract renewal
+- [app/api/tenants/[id]/paid-cycles/route.js](mdc:app/api/tenants/[id]/paid-cycles/route.js) - Cycle tracking
+- [app/api/payments/route.js](mdc:app/api/payments/route.js) - Updates completed_cycles
+
+## Billing Cycle Tracking
+1. Each paid bill increments `completed_cycles` counter
+2. Progress is displayed as "completed_cycles/contract_duration_months"
+3. Early termination threshold: Less than 5 completed cycles
+4. Normal termination: 5 or more completed cycles
+
+## Contract Lifecycle
+1. **Creation**: New tenant gets 6-month contract by default
+2. **Active Period**: Tenant pays monthly bills, cycles increment
+3. **Renewal**: Extends contract_end_date and increases total duration
+4. **Completion**: Move-out process based on cycle completion status
+
+## Business Rules
+1. Contract duration can be renewed/extended multiple times
+2. Early termination (< 5 cycles) forfeits security deposit
+3. Normal termination (≥ 5 cycles) allows full deposit refund
+4. Contract status determines available tenant actions
+5. Completed cycles reset only on new tenant, not on renewal

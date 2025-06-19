@@ -887,41 +887,19 @@ const sendMonthlyReport = async (recipientEmail, reportData) => {
   try {
     const transporter = createTransporter();
     
+    // Generate PDF report
+    const PDFReportService = require('./pdfReportService')
+    const pdfService = new PDFReportService()
+    
     const monthName = reportData.report_period.month_name
+    const pdfPath = await pdfService.generateMonthlyReportPDF(reportData)
+    
     const totalRevenue = reportData.financial_summary.total_revenue.toLocaleString()
     const occupancyRate = reportData.occupancy_metrics.occupancy_rate
     const activeTenants = reportData.tenant_statistics.active_tenants
     const revenueGrowth = reportData.financial_summary.revenue_growth
 
-    // Create branch performance table
-    const branchTable = reportData.branch_performance.map(branch => `
-      <tr>
-        <td style="padding: 8px; border: 1px solid #ddd;">${branch.branch_name}</td>
-        <td style="padding: 8px; border: 1px solid #ddd; text-align: center;">${branch.occupied_rooms}/${branch.total_rooms}</td>
-        <td style="padding: 8px; border: 1px solid #ddd; text-align: center;">${branch.occupancy_rate}%</td>
-        <td style="padding: 8px; border: 1px solid #ddd; text-align: right;">₱${branch.revenue.toLocaleString()}</td>
-      </tr>
-    `).join('')
-
-    // Create payment methods table
-    const paymentTable = reportData.payment_analysis.by_method.map(method => `
-      <tr>
-        <td style="padding: 8px; border: 1px solid #ddd;">${method.payment_method}</td>
-        <td style="padding: 8px; border: 1px solid #ddd; text-align: center;">${method.transaction_count}</td>
-        <td style="padding: 8px; border: 1px solid #ddd; text-align: right;">₱${method.total_amount.toLocaleString()}</td>
-        <td style="padding: 8px; border: 1px solid #ddd; text-align: center;">${method.percentage}%</td>
-      </tr>
-    `).join('')
-
-    // Create top performers table
-    const topPerformersTable = reportData.top_performers.map(tenant => `
-      <tr>
-        <td style="padding: 8px; border: 1px solid #ddd;">${tenant.tenant_name}</td>
-        <td style="padding: 8px; border: 1px solid #ddd; text-align: center;">${tenant.room_number}</td>
-        <td style="padding: 8px; border: 1px solid #ddd; text-align: right;">₱${tenant.total_paid.toLocaleString()}</td>
-      </tr>
-    `).join('')
-
+    // Simple HTML content for email body
     const htmlContent = `
       <!DOCTYPE html>
       <html>
@@ -930,20 +908,14 @@ const sendMonthlyReport = async (recipientEmail, reportData) => {
         <title>Monthly Business Report - ${monthName}</title>
         <style>
           body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; }
-          .container { max-width: 800px; margin: 0 auto; padding: 20px; }
+          .container { max-width: 600px; margin: 0 auto; padding: 20px; }
           .header { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 30px; text-align: center; border-radius: 10px; margin-bottom: 30px; }
-          .metric-card { background: #f8f9fa; border-left: 4px solid #007bff; padding: 20px; margin: 15px 0; border-radius: 5px; }
-          .metric-value { font-size: 2em; font-weight: bold; color: #007bff; }
+          .summary { background: #f8f9fa; padding: 20px; border-radius: 10px; margin: 20px 0; }
+          .metric { display: inline-block; margin: 10px 20px; text-align: center; }
+          .metric-value { font-size: 1.5em; font-weight: bold; color: #007bff; }
           .metric-label { color: #666; font-size: 0.9em; }
-          .growth-positive { color: #28a745; }
-          .growth-negative { color: #dc3545; }
-          .section { margin: 30px 0; }
-          .section-title { font-size: 1.5em; color: #333; border-bottom: 2px solid #007bff; padding-bottom: 10px; margin-bottom: 20px; }
-          table { width: 100%; border-collapse: collapse; margin: 15px 0; }
-          th { background: #007bff; color: white; padding: 12px; text-align: left; }
-          .summary-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; margin: 20px 0; }
-          .alert { background: #fff3cd; border: 1px solid #ffeaa7; color: #856404; padding: 15px; border-radius: 5px; margin: 15px 0; }
-          .footer { text-align: center; margin-top: 40px; padding: 20px; background: #f8f9fa; border-radius: 5px; }
+          .footer { text-align: center; margin-top: 40px; padding: 20px; background: #f8f9fa; border-radius: 5px; color: #666; }
+          .attachment-note { background: #e3f2fd; border-left: 4px solid #2196f3; padding: 15px; margin: 20px 0; }
         </style>
       </head>
       <body>
@@ -954,139 +926,41 @@ const sendMonthlyReport = async (recipientEmail, reportData) => {
             <p>Generated on ${new Date(reportData.report_period.generated_at).toLocaleDateString()}</p>
           </div>
 
-          <!-- Executive Summary -->
-          <div class="section">
-            <h2 class="section-title">📈 Executive Summary</h2>
-            <div class="summary-grid">
-              <div class="metric-card">
+          <div class="attachment-note">
+            <h3>📄 Complete Report Attached</h3>
+            <p>Please find the detailed monthly business report attached as a PDF file. The attachment contains comprehensive financial analysis, branch performance, tenant statistics, and actionable insights.</p>
+          </div>
+
+          <div class="summary">
+            <h3>📈 Quick Summary</h3>
+            <div class="metric">
                 <div class="metric-value">₱${totalRevenue}</div>
                 <div class="metric-label">Total Revenue</div>
-                <div class="${revenueGrowth >= 0 ? 'growth-positive' : 'growth-negative'}">
+              <div style="color: ${revenueGrowth >= 0 ? '#28a745' : '#dc3545'}">
                   ${revenueGrowth >= 0 ? '↗' : '↘'} ${Math.abs(revenueGrowth)}% vs last month
                 </div>
               </div>
-              <div class="metric-card">
+            <div class="metric">
                 <div class="metric-value">${occupancyRate}%</div>
                 <div class="metric-label">Occupancy Rate</div>
-                <div class="metric-label">${reportData.occupancy_metrics.occupied_rooms}/${reportData.occupancy_metrics.total_rooms} rooms occupied</div>
+              <div class="metric-label">${reportData.occupancy_metrics.occupied_rooms}/${reportData.occupancy_metrics.total_rooms} rooms</div>
               </div>
-              <div class="metric-card">
+            <div class="metric">
                 <div class="metric-value">${activeTenants}</div>
                 <div class="metric-label">Active Tenants</div>
-                <div class="metric-label">Net change: ${reportData.tenant_statistics.net_tenant_change >= 0 ? '+' : ''}${reportData.tenant_statistics.net_tenant_change}</div>
-              </div>
-              <div class="metric-card">
-                <div class="metric-value">${reportData.financial_summary.collection_rate}%</div>
-                <div class="metric-label">Collection Rate</div>
-                <div class="metric-label">₱${reportData.financial_summary.total_billed.toLocaleString()} billed</div>
-              </div>
+              <div class="metric-label">Net: ${reportData.tenant_statistics.net_tenant_change >= 0 ? '+' : ''}${reportData.tenant_statistics.net_tenant_change}</div>
             </div>
           </div>
 
-          <!-- Financial Performance -->
-          <div class="section">
-            <h2 class="section-title">💰 Financial Performance</h2>
-            <div class="summary-grid">
-              <div class="metric-card">
-                <div class="metric-value">${reportData.financial_summary.total_transactions}</div>
-                <div class="metric-label">Total Transactions</div>
-              </div>
-              <div class="metric-card">
-                <div class="metric-value">₱${reportData.outstanding_summary.total_outstanding.toLocaleString()}</div>
-                <div class="metric-label">Outstanding Amount</div>
-                <div class="metric-label">${reportData.outstanding_summary.unpaid_bills_count + reportData.outstanding_summary.partial_bills_count} bills pending</div>
-              </div>
-            </div>
-
-            <h3>Payment Methods Breakdown</h3>
-            <table>
-              <thead>
-                <tr>
-                  <th>Payment Method</th>
-                  <th>Transactions</th>
-                  <th>Amount</th>
-                  <th>Percentage</th>
-                </tr>
-              </thead>
-              <tbody>
-                ${paymentTable}
-              </tbody>
-            </table>
-          </div>
-
-          <!-- Branch Performance -->
-          <div class="section">
-            <h2 class="section-title">🏢 Branch Performance</h2>
-            <table>
-              <thead>
-                <tr>
-                  <th>Branch</th>
-                  <th>Occupancy</th>
-                  <th>Rate</th>
-                  <th>Revenue</th>
-                </tr>
-              </thead>
-              <tbody>
-                ${branchTable}
-              </tbody>
-            </table>
-          </div>
-
-          <!-- Tenant Statistics -->
-          <div class="section">
-            <h2 class="section-title">👥 Tenant Statistics</h2>
-            <div class="summary-grid">
-              <div class="metric-card">
-                <div class="metric-value">${reportData.tenant_statistics.new_tenants}</div>
-                <div class="metric-label">New Tenants</div>
-              </div>
-              <div class="metric-card">
-                <div class="metric-value">${reportData.tenant_statistics.departed_tenants}</div>
-                <div class="metric-label">Departed Tenants</div>
-              </div>
-              <div class="metric-card">
-                <div class="metric-value">${reportData.tenant_statistics.expiring_contracts}</div>
-                <div class="metric-label">Expiring Contracts</div>
-                <div class="metric-label">Next 30 days</div>
-              </div>
-            </div>
-          </div>
-
-          <!-- Top Performers -->
-          ${reportData.top_performers.length > 0 ? `
-          <div class="section">
-            <h2 class="section-title">🌟 Top Paying Tenants</h2>
-            <table>
-              <thead>
-                <tr>
-                  <th>Tenant Name</th>
-                  <th>Room</th>
-                  <th>Amount Paid</th>
-                </tr>
-              </thead>
-              <tbody>
-                ${topPerformersTable}
-              </tbody>
-            </table>
-          </div>
-          ` : ''}
-
-          <!-- Alerts & Recommendations -->
           ${reportData.outstanding_summary.total_outstanding > 0 ? `
-          <div class="alert">
+          <div style="background: #fff3cd; border: 1px solid #ffeaa7; color: #856404; padding: 15px; border-radius: 5px; margin: 15px 0;">
             <strong>⚠️ Action Required:</strong> There are ₱${reportData.outstanding_summary.total_outstanding.toLocaleString()} in outstanding payments that need attention.
           </div>
           ` : ''}
 
           ${reportData.tenant_statistics.expiring_contracts > 0 ? `
-          <div class="alert">
+          <div style="background: #fff3cd; border: 1px solid #ffeaa7; color: #856404; padding: 15px; border-radius: 5px; margin: 15px 0;">
             <strong>📅 Contract Renewals:</strong> ${reportData.tenant_statistics.expiring_contracts} contracts are expiring in the next 30 days.
-          </div>
-          ` : ''}
-
-          ${occupancyRate < 80 ? `
-          <div class="alert">
-            <strong>🏠 Occupancy Alert:</strong> Current occupancy rate is ${occupancyRate}%. Consider marketing strategies to increase occupancy.
           </div>
           ` : ''}
 
@@ -1104,32 +978,22 @@ const sendMonthlyReport = async (recipientEmail, reportData) => {
 J&H APARTMENT MONTHLY REPORT - ${monthName}
 Generated: ${new Date(reportData.report_period.generated_at).toLocaleDateString()}
 
-EXECUTIVE SUMMARY
-=================
+COMPLETE REPORT ATTACHED
+Please find the detailed monthly business report attached as a PDF file.
+
+QUICK SUMMARY
+=============
 Total Revenue: ₱${totalRevenue} (${revenueGrowth >= 0 ? '+' : ''}${revenueGrowth}% vs last month)
 Occupancy Rate: ${occupancyRate}% (${reportData.occupancy_metrics.occupied_rooms}/${reportData.occupancy_metrics.total_rooms} rooms)
 Active Tenants: ${activeTenants} (Net change: ${reportData.tenant_statistics.net_tenant_change >= 0 ? '+' : ''}${reportData.tenant_statistics.net_tenant_change})
-Collection Rate: ${reportData.financial_summary.collection_rate}%
 
-FINANCIAL PERFORMANCE
-=====================
-Total Transactions: ${reportData.financial_summary.total_transactions}
-Total Billed: ₱${reportData.financial_summary.total_billed.toLocaleString()}
-Outstanding Amount: ₱${reportData.outstanding_summary.total_outstanding.toLocaleString()}
-
-TENANT STATISTICS
-=================
-New Tenants: ${reportData.tenant_statistics.new_tenants}
-Departed Tenants: ${reportData.tenant_statistics.departed_tenants}
-Expiring Contracts (30 days): ${reportData.tenant_statistics.expiring_contracts}
-
-BRANCH PERFORMANCE
-==================
-${reportData.branch_performance.map(branch => 
-  `${branch.branch_name}: ${branch.occupancy_rate}% occupancy, ₱${branch.revenue.toLocaleString()} revenue`
-).join('\n')}
+${reportData.outstanding_summary.total_outstanding > 0 ? 
+  `ACTION REQUIRED: ₱${reportData.outstanding_summary.total_outstanding.toLocaleString()} in outstanding payments\n` : ''}
+${reportData.tenant_statistics.expiring_contracts > 0 ? 
+  `CONTRACT RENEWALS: ${reportData.tenant_statistics.expiring_contracts} contracts expiring in 30 days\n` : ''}
 
 This report was automatically generated by J&H Apartment Management System.
+For the complete analysis, please see the attached PDF report.
     `
 
     const mailOptions = {
@@ -1137,15 +1001,26 @@ This report was automatically generated by J&H Apartment Management System.
       to: recipientEmail,
       subject: `📊 Monthly Business Report - ${monthName} | J&H Apartment`,
       text: textContent,
-      html: htmlContent
+      html: htmlContent,
+      attachments: [
+        {
+          filename: `J&H_Monthly_Report_${monthName.replace(/\s+/g, '_')}.pdf`,
+          path: pdfPath,
+          contentType: 'application/pdf'
+        }
+      ]
     }
 
     const result = await transporter.sendMail(mailOptions)
-    console.log('Monthly report email sent successfully:', result.messageId)
+    
+    // Clean up temporary PDF file
+    PDFReportService.cleanup(pdfPath)
+    
+    console.log('Monthly report email sent successfully with PDF attachment:', result.messageId)
     
     return {
       success: true,
-      message: 'Monthly report email sent successfully',
+      message: 'Monthly report email sent successfully with PDF attachment',
       messageId: result.messageId
     }
 

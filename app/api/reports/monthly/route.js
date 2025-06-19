@@ -31,19 +31,25 @@ export async function GET(request) {
     console.log(`📅 Calendar boundaries: ${calendarMonthStart} to ${calendarMonthEnd}`)
     console.log(`🏠 Looking for billing cycles ending in this month and payments made in this month`)
 
-    // 1. Financial Summary - Billing Cycle Based
-    // Revenue: Payments made during the calendar month
-    // Billing: Bills for cycles ending during the calendar month (rent_to within month)
+    // 1. Financial Summary - Billing Cycle Based with Income/Expense Separation (using actual payment dates)
     const financialDataResult = await pool.query(`
       WITH all_payments AS (
-        SELECT bill_id, payment_date, amount, id FROM payments
+        SELECT bill_id, COALESCE(actual_payment_date, payment_date) as payment_date, amount, id FROM payments
         UNION ALL
-        SELECT original_bill_id as bill_id, payment_date, amount, original_payment_id as id FROM payment_history
+        SELECT original_bill_id as bill_id, COALESCE(actual_payment_date, payment_date) as payment_date, amount, original_payment_id as id FROM payment_history
       ),
       all_bills AS (
-        SELECT id, bill_date, total_amount, status, rent_from, rent_to FROM bills
+        SELECT 
+          id, bill_date, total_amount, status, rent_from, rent_to,
+          rent_amount, extra_fee_amount,
+          electric_amount, water_amount
+        FROM bills
         UNION ALL
-        SELECT original_bill_id as id, bill_date, total_amount, status, rent_from, rent_to FROM bill_history
+        SELECT 
+          original_bill_id as id, bill_date, total_amount, status, rent_from, rent_to,
+          rent_amount, extra_fee_amount,
+          electric_amount, water_amount
+        FROM bill_history
       ),
       billing_cycles_ending_this_month AS (
         -- Bills for billing cycles that END in this calendar month
@@ -56,18 +62,28 @@ export async function GET(request) {
         WHERE payment_date BETWEEN $3 AND $4
       )
       SELECT 
-        -- Revenue: Actual payments received this month
+        -- Income Components (Rent + Extra Fees)
+        COALESCE(SUM(bcem.rent_amount), 0) as total_rent_billed,
+        COALESCE(SUM(bcem.extra_fee_amount), 0) as total_extra_fees_billed,
+        
+        -- Expense Components (Electricity + Water)
+        COALESCE(SUM(bcem.electric_amount), 0) as total_electricity_billed,
+        COALESCE(SUM(bcem.water_amount), 0) as total_water_billed,
+        
+        -- Total Revenue from Payments
         COALESCE(SUM(pmtm.amount), 0) as total_revenue,
-        -- Billing: Bills for cycles ending this month (what tenants should pay)
+        
+        -- Billing Summary
         COALESCE(SUM(bcem.total_amount), 0) as total_billed,
-        -- Unpaid: From current unpaid bills where cycle ended this month
+        
+        -- Unpaid/Partial Amounts
         COALESCE(SUM(CASE WHEN bcem.status = 'unpaid' THEN bcem.total_amount END), 0) as unpaid_amount,
-        -- Partial: From current partial bills where cycle ended this month
         COALESCE(SUM(CASE WHEN bcem.status = 'partial' THEN bcem.total_amount - COALESCE(paid_amounts.total_paid, 0) END), 0) as partial_amount,
-        -- Transactions: Payment count this month
+        
+        -- Transaction Counts
         COUNT(DISTINCT pmtm.id) as total_transactions,
-        -- Bills: Billing cycles ending this month
         COUNT(DISTINCT bcem.id) as bills_generated,
+        
         -- Cycle info for debugging
         COUNT(DISTINCT bcem.id) as cycles_ending_this_month,
         COUNT(DISTINCT pmtm.id) as payments_this_month
@@ -102,12 +118,12 @@ export async function GET(request) {
       FROM rooms r
     `)
 
-    // 4. Branch Performance - Based on payments made this month
+    // 4. Branch Performance - Based on payments made this month (using actual payment dates)
     const branchPerformanceResult = await pool.query(`
       WITH all_payments AS (
-        SELECT bill_id, payment_date, amount FROM payments
+        SELECT bill_id, COALESCE(actual_payment_date, payment_date) as payment_date, amount FROM payments
         UNION ALL
-        SELECT original_bill_id as bill_id, payment_date, amount FROM payment_history
+        SELECT original_bill_id as bill_id, COALESCE(actual_payment_date, payment_date) as payment_date, amount FROM payment_history
       )
       SELECT 
         br.name as branch_name,
@@ -124,12 +140,12 @@ export async function GET(request) {
       ORDER BY branch_revenue DESC
     `, [calendarMonthStart, calendarMonthEnd, calendarMonthStart, calendarMonthEnd])
 
-    // 5. Payment Method Analysis - Payments made this month
+    // 5. Payment Method Analysis - Payments made this month (using actual payment dates)
     const paymentMethodsResult = await pool.query(`
       WITH all_payments AS (
-        SELECT payment_method::text as payment_method, payment_date, amount FROM payments
+        SELECT payment_method::text as payment_method, COALESCE(actual_payment_date, payment_date) as payment_date, amount FROM payments
         UNION ALL
-        SELECT payment_method::text as payment_method, payment_date, amount FROM payment_history
+        SELECT payment_method::text as payment_method, COALESCE(actual_payment_date, payment_date) as payment_date, amount FROM payment_history
       )
       SELECT 
         payment_method,
@@ -141,12 +157,12 @@ export async function GET(request) {
       ORDER BY total_amount DESC
     `, [calendarMonthStart, calendarMonthEnd])
 
-    // 6. Top Performing Metrics - Based on payments made this month
+    // 6. Top Performing Metrics - Based on payments made this month (using actual payment dates)
     const topMetricsResult = await pool.query(`
       WITH all_payments AS (
-        SELECT bill_id, payment_date, amount FROM payments
+        SELECT bill_id, COALESCE(actual_payment_date, payment_date) as payment_date, amount FROM payments
         UNION ALL
-        SELECT original_bill_id as bill_id, payment_date, amount FROM payment_history
+        SELECT original_bill_id as bill_id, COALESCE(actual_payment_date, payment_date) as payment_date, amount FROM payment_history
       ),
       all_bills AS (
         SELECT id, tenant_id FROM bills
@@ -185,16 +201,16 @@ export async function GET(request) {
       WHERE b.status IN ('unpaid', 'partial')
     `)
 
-    // 8. Monthly Trends (compare with previous month) - Based on payment dates
+    // 8. Monthly Trends (compare with previous month) - Based on actual payment dates
     const prevMonth = new Date(year, monthNum - 2, 1).toISOString().slice(0, 7)
     const prevMonthStart = `${prevMonth}-01`
     const prevMonthEnd = new Date(year, monthNum - 1, 0).toISOString().slice(0, 10)
 
     const previousMonthDataResult = await pool.query(`
       WITH all_payments AS (
-        SELECT amount, payment_date, id FROM payments
+        SELECT amount, COALESCE(actual_payment_date, payment_date) as payment_date, id FROM payments
         UNION ALL
-        SELECT amount, payment_date, original_payment_id as id FROM payment_history
+        SELECT amount, COALESCE(actual_payment_date, payment_date) as payment_date, original_payment_id as id FROM payment_history
       )
       SELECT 
         COALESCE(SUM(amount), 0) as prev_revenue,
@@ -227,9 +243,9 @@ export async function GET(request) {
           SELECT rent_to FROM bill_history
         ),
         all_payments AS (
-          SELECT payment_date FROM payments
+          SELECT COALESCE(actual_payment_date, payment_date) as payment_date FROM payments
           UNION ALL
-          SELECT payment_date FROM payment_history
+          SELECT COALESCE(actual_payment_date, payment_date) as payment_date FROM payment_history
         ),
         billing_months AS (
           SELECT DISTINCT TO_CHAR(rent_to, 'YYYY-MM') as month
@@ -281,6 +297,21 @@ export async function GET(request) {
         description: 'Revenue based on payments made during the month. Billing based on tenant cycles ending during the month.'
       },
       financial_summary: {
+        // Income Components
+        total_rent: parseFloat(financialData[0].total_rent_billed || 0),
+        total_extra_fees: parseFloat(financialData[0].total_extra_fees_billed || 0),
+        total_income: parseFloat((financialData[0].total_rent_billed || 0)) + parseFloat((financialData[0].total_extra_fees_billed || 0)),
+        
+        // Expense Components
+        total_electricity: parseFloat(financialData[0].total_electricity_billed || 0),
+        total_water: parseFloat(financialData[0].total_water_billed || 0),
+        total_expenses: parseFloat((financialData[0].total_electricity_billed || 0)) + parseFloat((financialData[0].total_water_billed || 0)),
+        
+        // Net Income (Total Income - Total Expenses)
+        net_income: (parseFloat(financialData[0].total_rent_billed || 0) + parseFloat(financialData[0].total_extra_fees_billed || 0)) - 
+                   (parseFloat(financialData[0].total_electricity_billed || 0) + parseFloat(financialData[0].total_water_billed || 0)),
+        
+        // Overall Summary
         total_revenue: parseFloat(financialData[0].total_revenue),
         total_billed: parseFloat(financialData[0].total_billed),
         collection_rate: financialData[0].total_billed > 0 

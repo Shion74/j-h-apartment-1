@@ -69,14 +69,16 @@ export async function POST(request) {
     const {
       bill_id,
       payment_amount,
-      payment_method,
       payment_type, // 'cash', 'gcash', 'bank', 'check', 'other'
       actual_payment_date, // actual date when tenant made the payment
       notes
     } = await request.json()
 
+    // Get the authenticated user's name as prepared_by
+    const prepared_by = authResult.user.name || 'System'
+
     // Validation
-    if (!bill_id || !payment_amount || !payment_method || !payment_type) {
+    if (!bill_id || !payment_amount || !payment_type || !actual_payment_date) {
       return NextResponse.json(
         { success: false, message: 'Required fields missing' },
         { status: 400 }
@@ -177,7 +179,7 @@ export async function POST(request) {
     }
 
     // If using deposits, validate against available deposit balance
-    if (payment_method === 'deposit') {
+    if (payment_type === 'deposit') {
       const dbDepositType = mapDepositType(payment_type)
       const depositResult = await pool.query(`
         SELECT remaining_balance 
@@ -240,14 +242,16 @@ export async function POST(request) {
       }
 
       // Insert payment record with actual payment date
+      // Use actual_payment_date for both fields - this allows historical data entry
+      const finalPaymentDate = actual_payment_date || new Date().toISOString().split('T')[0]
       const paymentResult = await client.query(`
         INSERT INTO payments (
           bill_id, amount, payment_date, actual_payment_date, payment_method, notes
-        ) VALUES ($1, $2, CURRENT_DATE, $3, $4, $5) RETURNING id
+        ) VALUES ($1, $2, $3, $3, $4, $5) RETURNING id
       `, [
         bill_id, 
         requestedAmount, 
-        actual_payment_date || new Date().toISOString().split('T')[0], 
+        finalPaymentDate, // Use actual payment date for payment_date too
         actualPaymentMethod, 
         notes || ''
       ])
@@ -293,28 +297,46 @@ export async function POST(request) {
       let tenantMovedOut = false
       
       if (billStatus === 'paid') {
+        // Get the actual payment date from the most recent payment
+        const actualPaymentDateResult = await client.query(`
+          SELECT COALESCE(actual_payment_date, payment_date) as actual_payment_date
+          FROM payments 
+          WHERE bill_id = $1 
+          ORDER BY created_at DESC 
+          LIMIT 1
+        `, [bill_id])
+        
+        const actualPaymentDate = actualPaymentDateResult.rows[0]?.actual_payment_date || new Date().toISOString().split('T')[0]
+
         // Archive to bill_history
         await client.query(`
           INSERT INTO bill_history (
-            original_bill_id, original_tenant_id, tenant_name, room_id, room_number,
-            rent_from, rent_to, rent_amount, electric_previous_reading, electric_present_reading,
-            electric_consumption, electric_rate_per_kwh, electric_amount, electric_reading_date, electric_previous_date,
-            water_amount, extra_fee_amount, extra_fee_description, total_amount,
-            bill_date, due_date, status, prepared_by, is_final_bill,
-            penalty_fee_amount, penalty_applied, total_paid, remaining_balance,
-            payment_date, payment_method, created_at, updated_at, archived_at
+            original_bill_id, original_tenant_id, room_id, bill_date,
+            rent_from, rent_to, rent_amount, electric_previous_reading,
+            electric_present_reading, electric_consumption, electric_rate_per_kwh, electric_amount,
+            water_amount, extra_fee_amount, extra_fee_description,
+            total_amount, status, prepared_by, is_final_bill, is_refund_bill,
+            payment_date, actual_payment_date, total_paid, remaining_balance,
+            tenant_name, room_number, branch_name, archived_by, archive_reason,
+            deposit_applied, original_bill_amount, payment_method, electric_reading_date,
+            due_date
           )
           SELECT 
-            id, tenant_id, $1, room_id,
-            (SELECT room_number FROM rooms WHERE id = bills.room_id),
-            rent_from, rent_to, rent_amount, electric_previous_reading, electric_present_reading,
-            electric_consumption, electric_rate_per_kwh, electric_amount, electric_reading_date, electric_previous_date,
-            water_amount, extra_fee_amount, extra_fee_description, total_amount,
-            bill_date, due_date, status, prepared_by, is_final_bill,
-            penalty_fee_amount, penalty_applied, $2, 0,
-            $3, $4, created_at, updated_at, NOW()
-          FROM bills WHERE id = $5
-        `, [bill.tenant_name, totalPaidAmount, actual_payment_date, actualPaymentMethod, bill_id])
+            b.id, b.tenant_id, b.room_id, b.bill_date,
+            b.rent_from, b.rent_to, b.rent_amount, b.electric_previous_reading,
+            b.electric_present_reading, b.electric_consumption, b.electric_rate_per_kwh, b.electric_amount,
+            b.water_amount, b.extra_fee_amount, b.extra_fee_description,
+            b.total_amount, 'paid', $1, b.is_final_bill, b.is_refund_bill,
+            CURRENT_DATE, $5, $2, 0,
+            t.name, r.room_number, br.name, $1, 'payment_completed',
+            b.deposit_applied, b.original_bill_amount, $3, b.electric_reading_date,
+            b.due_date
+          FROM bills b
+          LEFT JOIN tenants t ON b.tenant_id = t.id
+          LEFT JOIN rooms r ON b.room_id = r.id
+          LEFT JOIN branches br ON r.branch_id = br.id
+          WHERE b.id = $4
+        `, [prepared_by, payment_amount, payment_type, bill_id, actualPaymentDate])
 
         // Archive payments to payment_history before deleting the bill
         await client.query(`

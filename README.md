@@ -174,7 +174,7 @@ J-H-Apartment/
 │   ├── emailService.js           # Email service
 │   ├── receiptService.js         # Receipt generation
 │   ├── billingReminderService.js # Billing reminders
-│   └── contractService.js        # Contract management
+│   └── contractService.js        # Contract management (embedded in tenants table)
 ├── migrations/                   # Database migrations
 │   ├── 001_*.sql                 # Initial schema
 │   ├── 022_*.sql                 # Electric rate archiving

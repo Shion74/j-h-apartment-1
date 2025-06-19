@@ -21,8 +21,9 @@ export async function GET(request) {
         'smtp_host', 'smtp_port', 'smtp_user', 'smtp_password', 
         'smtp_from_email', 'smtp_from_name'
       )
-    const settings = settingsResult.rows
     `)
+
+    const settings = settingsResult.rows
 
     // Format settings into object
     const emailSettings = {
@@ -71,19 +72,21 @@ export async function PUT(request) {
     ]
 
     // Start transaction
-    const connection = await pool.getConnection()
-    await connection.beginTransaction()
-
+    const client = await pool.connect()
+    
     try {
+      await client.query('BEGIN')
+
       // Update each setting
       for (const [key, value] of Object.entries(emailSettings)) {
         if (validSettings.includes(key)) {
-          await connection.execute(`
+          await client.query(`
             INSERT INTO settings (setting_key, setting_value, description) 
-            VALUES ($1, $2, $1) RETURNING id
-            ON DUPLICATE KEY UPDATE 
-            setting_value = VALUES(setting_value),
-            updated_at = CURRENT_TIMESTAMP
+            VALUES ($1, $2, $3)
+            ON CONFLICT (setting_key) 
+            DO UPDATE SET 
+              setting_value = EXCLUDED.setting_value,
+              updated_at = CURRENT_TIMESTAMP
           `, [
             key, 
             value || '', 
@@ -92,8 +95,7 @@ export async function PUT(request) {
         }
       }
 
-      await connection.commit()
-      connection.release()
+      await client.query('COMMIT')
 
       return NextResponse.json({
         success: true,
@@ -101,9 +103,10 @@ export async function PUT(request) {
       })
 
     } catch (error) {
-      await connection.rollback()
-      connection.release()
+      await client.query('ROLLBACK')
       throw error
+    } finally {
+      client.release()
     }
 
   } catch (error) {

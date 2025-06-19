@@ -266,11 +266,11 @@ export default function BillingPage() {
         ).join('\n')
         
         const overrideConfirm = window.confirm(
-          `⚠️ UNPAID BILLS DETECTED ⚠️\n\n` +
+          `UNPAID BILLS DETECTED\n\n` +
           `Tenant has ${data.unpaid_bills.length} unpaid bill(s):\n${unpaidBillsList}\n\n` +
           `Total unpaid: ₱${data.total_unpaid.toFixed(2)}\n\n` +
-          `🛡️ ADMIN OVERRIDE: Generate bill anyway?\n\n` +
-          `⚠️ Warning: This will create a new bill while previous bills remain unpaid. ` +
+          `ADMIN OVERRIDE: Generate bill anyway?\n\n` +
+          `Warning: This will create a new bill while previous bills remain unpaid. ` +
           `Make sure this is intentional (e.g., for billing corrections or special circumstances).`
         )
         
@@ -349,10 +349,10 @@ export default function BillingPage() {
   // Filter active bills (unpaid, partial, and refund) bills - exclude paid bills
   const activeBills = bills.filter(bill => bill.status !== 'paid')
 
-  // Filter rooms and bills by branch
+  // Filter rooms and bills by branch, and only show rooms with tenants
   const filteredRooms = branchFilter 
-    ? rooms.filter(room => room.branch_name === branchFilter)
-    : rooms
+    ? rooms.filter(room => room.branch_name === branchFilter && room.tenant_name && room.billing_status !== 'no_tenant')
+    : rooms.filter(room => room.tenant_name && room.billing_status !== 'no_tenant')
 
   const filteredActiveBills = branchFilter
     ? activeBills.filter(bill => bill.branch_name === branchFilter)
@@ -569,13 +569,13 @@ export default function BillingPage() {
           </span>
         )
       case 'has_unpaid_bills':
-        return <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-red-100 text-red-800">⚠️ Unpaid Bills</span>
+        return <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-red-100 text-red-800">Unpaid Bills</span>
       case 'already_billed':
         return <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-yellow-100 text-yellow-800">Billed</span>
       case 'no_tenant':
         return <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-800">No Tenant</span>
       default:
-        return <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800">Up to Date</span>
+        return <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-800">Not Due Yet</span>
     }
   }
 
@@ -730,7 +730,7 @@ export default function BillingPage() {
                           disabled
                           className="w-full inline-flex justify-center items-center px-3 py-2 border border-gray-300 text-sm leading-4 font-medium rounded-md text-gray-500 bg-gray-100 cursor-not-allowed"
                         >
-                          Up to Date
+                          Not Due Yet
                         </button>
                       )}
                     </div>
@@ -788,24 +788,6 @@ export default function BillingPage() {
                               <span className="ml-2 text-xs text-gray-500">
                                 ({bill.branch_name})
                               </span>
-                                            <span className={`ml-2 inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${
-                bill.status === 'paid' 
-                  ? 'bg-green-100 text-green-800'
-                  : bill.status === 'partial'
-                  ? 'bg-yellow-100 text-yellow-800'
-                  : bill.status === 'overdue'
-                  ? 'bg-red-100 text-red-800'
-                  : bill.status === 'refund'
-                  ? 'bg-blue-100 text-blue-800'
-                  : 'bg-gray-100 text-gray-800'
-              }`}>
-                {bill.status === 'refund' ? '💰 Refund' : bill.status.charAt(0).toUpperCase() + bill.status.slice(1)}
-              </span>
-                              {bill.is_final_bill && (
-                                <span className="ml-2 inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-purple-100 text-purple-800">
-                                  🏠 Final Bill
-                                </span>
-                              )}
                             </div>
                             <div className="mt-2 flex items-center text-sm text-gray-500">
                               <CalendarIcon className="flex-shrink-0 mr-1.5 h-4 w-4" />
@@ -1268,8 +1250,15 @@ export default function BillingPage() {
                     required
                   />
                   <p className="text-xs text-gray-500 mt-1">
-                    Date when tenant actually made the payment. Late payments (more than 10 days after billing period ends) will incur a {penaltyPercentage}% penalty fee.
+                    Date when tenant actually made the payment. You can set any date for historical data entry. Late payments (more than 10 days after billing period ends) will incur a {penaltyPercentage}% penalty fee.
                   </p>
+                  {paymentFormData.actual_payment_date && paymentFormData.actual_payment_date !== new Date().toISOString().split('T')[0] && (
+                    <div className="mt-2 p-2 bg-blue-50 border border-blue-200 rounded-md">
+                      <p className="text-xs text-blue-800">
+                        📅 Using custom payment date: {formatDate(paymentFormData.actual_payment_date)} (This will be used for all reports and calculations)
+                      </p>
+                    </div>
+                  )}
                 </div>
 
                 {/* Penalty Fee Warning */}
